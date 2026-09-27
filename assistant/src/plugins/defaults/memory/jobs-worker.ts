@@ -889,8 +889,8 @@ export function maybeEnqueueScheduledCleanupJobs(
 
 // ── Graph maintenance scheduling ──────────────────────────────────
 
-const GRAPH_DECAY_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
-const GRAPH_CONSOLIDATE_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
+const GRAPH_DECAY_INTERVAL_MS = 30 * 60 * 1000; // 30 min (local patch Sep 27, was 1h)
+const GRAPH_CONSOLIDATE_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2 hours (local patch Sep 27, was 4h)
 const GRAPH_PATTERN_SCAN_INTERVAL_MS = 24 * 60 * 60 * 1000; // 1 day
 const GRAPH_NARRATIVE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // 1 week
 // Backstop cadence for v3 self-maintenance. The primary trigger is the
@@ -898,7 +898,7 @@ const GRAPH_NARRATIVE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // 1 week
 // covers the case where that follow-up is missed (enqueue failure). A
 // conservative cadence is fine since
 // the maintenance pass is idempotent and cheap when there's nothing to do.
-const GRAPH_V3_MAINTAIN_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
+const GRAPH_V3_MAINTAIN_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2 hours (local patch Sep 27, was 6h)
 
 export const GRAPH_MAINTENANCE_CHECKPOINTS = {
   decay: "graph_maintenance:decay:last_run",

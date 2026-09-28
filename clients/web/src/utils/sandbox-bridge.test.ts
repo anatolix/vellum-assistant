@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 import {
+  APP_FRAME_CSP_META,
   buildLinkInterceptorScript,
   buildStoragePolyfill,
   buildWidgetHeightReporterScript,
@@ -10,6 +11,7 @@ import {
   injectBridge,
   injectScript,
   injectWidgetBridge,
+  isBlockedRelayPath,
   isRelayableExternalHref,
   WIDGET_CSP_META,
   jsonForScript,
@@ -236,6 +238,87 @@ describe("injectBridge", () => {
     // "/v1/x/" check accepts callers that omit the version prefix.
     expect(out).toContain("path.indexOf('/x/') === 0");
     expect(out).toContain("'/v1' + path");
+  });
+
+  it("prepends the network-blocking app CSP ahead of the polyfill and content", () => {
+    const html =
+      "<!doctype html><html><head></head><body><div>app</div></body></html>";
+    const out = injectBridge(html, FRAME_ID, { fetch: true });
+
+    const cspIdx = out.indexOf(APP_FRAME_CSP_META);
+    expect(cspIdx).toBeGreaterThan(-1);
+    expect(out).toContain("default-src 'none'");
+    // CSP first so it governs the polyfill and every app script that follows.
+    expect(cspIdx).toBeLessThan(out.indexOf("storageShim"));
+    expect(cspIdx).toBeLessThan(out.indexOf("<div>app</div>"));
+  });
+
+  it("places the CSP before resources serialized ahead of <head>", () => {
+    // A meta CSP only governs tokens that follow it. A malformed document
+    // that carries a script before the <head> tag parses that script into
+    // the implicit head in source order, so the CSP has to sit before every
+    // app-controlled token, not just before the head open tag.
+    const html =
+      '<!doctype html><script>new WebSocket("https://attacker")</script><html><head></head><body></body></html>';
+    const out = injectBridge(html, FRAME_ID, { fetch: true });
+
+    const cspIdx = out.indexOf(APP_FRAME_CSP_META);
+    expect(cspIdx).toBeGreaterThan(-1);
+    expect(cspIdx).toBeGreaterThan(out.indexOf("<!doctype"));
+    expect(cspIdx).toBeLessThan(out.indexOf("<script>new WebSocket"));
+  });
+
+  it("places the CSP at index zero for fragments without a doctype", () => {
+    const out = injectBridge("<html><body></body></html>", FRAME_ID, {
+      fetch: true,
+    });
+    expect(out.startsWith(APP_FRAME_CSP_META)).toBe(true);
+  });
+
+  it("allows blob: subresources but no direct network in the app CSP", () => {
+    // window.vellum.asset() resolves bundled assets into blob URLs, so blob:
+    // must load as script, image, font, and media. Direct network access
+    // stays denied: connect-src has no entry of its own and falls back to
+    // default-src 'none'.
+    expect(APP_FRAME_CSP_META).toContain("default-src 'none'");
+    expect(APP_FRAME_CSP_META).toContain("script-src 'unsafe-inline' blob:");
+    expect(APP_FRAME_CSP_META).toContain("img-src data: blob:");
+    expect(APP_FRAME_CSP_META).toContain("font-src data: blob:");
+    expect(APP_FRAME_CSP_META).toContain("media-src data: blob:");
+    // No connect-src directive: it falls back to default-src 'none', which
+    // is what blocks direct network access from the frame.
+    expect(APP_FRAME_CSP_META).not.toContain("connect-src");
+    expect(APP_FRAME_CSP_META).toContain("base-uri 'none'");
+    expect(APP_FRAME_CSP_META).toContain("form-action 'none'");
+    expect(APP_FRAME_CSP_META).toContain("frame-src 'none'");
+  });
+});
+
+describe("isBlockedRelayPath", () => {
+  it("rejects raw backslashes anywhere in the path", () => {
+    expect(isBlockedRelayPath("/v1/x/..\\config")).toBe(true);
+    expect(isBlockedRelayPath("/v1/x/foo\\bar")).toBe(true);
+  });
+
+  it("rejects percent-encoded backslashes in any case", () => {
+    expect(isBlockedRelayPath("/v1/x/..%5cconfig")).toBe(true);
+    expect(isBlockedRelayPath("/v1/x/..%5Cconfig")).toBe(true);
+  });
+
+  it("refuses non-string payloads instead of crashing on them", () => {
+    // Relay messages come from the frame untyped. A non-string path must
+    // produce a blocked response, not a thrown error and a hanging request.
+    expect(isBlockedRelayPath(null as unknown as string)).toBe(true);
+    expect(isBlockedRelayPath(undefined as unknown as string)).toBe(true);
+    expect(isBlockedRelayPath({ nested: true } as unknown as string)).toBe(
+      true,
+    );
+  });
+
+  it("allows legitimate relay paths", () => {
+    expect(isBlockedRelayPath("/v1/x/my-app/status")).toBe(false);
+    expect(isBlockedRelayPath("/v1/x/my%20route")).toBe(false);
+    expect(isBlockedRelayPath("/v1/config")).toBe(false);
   });
 });
 
@@ -616,7 +699,7 @@ describe("injectWidgetBridge", () => {
 
   it("handles fragments without head/body tags", () => {
     const out = injectWidgetBridge("<svg></svg>", FRAME_ID, "<style>x</style>");
-    expect(out.startsWith(WIDGET_CSP_META)).toBe(true);
+    expect(out.indexOf(WIDGET_CSP_META)).toBeLessThan(out.indexOf("<svg>"));
     expect(out).toContain("<svg></svg>");
     expect(out.indexOf("<style>x</style>")).toBeLessThan(
       out.indexOf("<svg></svg>"),

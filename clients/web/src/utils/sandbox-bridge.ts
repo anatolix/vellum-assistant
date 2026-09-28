@@ -49,6 +49,28 @@
 export const FETCH_PROXY_PATH_RE = /^\/v1\/x\//;
 
 /**
+ * Whether a relay path must be refused outright.
+ *
+ * A percent-encoded backslash (`%5C`) survives every canonical check the
+ * validator can do on its own string (WHATWG URL parsing collapses
+ * dot-segments but never decodes `%5C`), while the forwarding chain decodes
+ * it into a literal backslash that downstream URL normalizers then treat as
+ * a path separator. A path like `/v1/x/..%5Cconfig` therefore passes
+ * validation here and still resolves to `/config` at the daemon. Since no
+ * legitimate relay route contains a backslash in any form, both the raw and
+ * encoded forms are rejected before the allowlist runs.
+ */
+export function isBlockedRelayPath(path: string): boolean {
+  if (typeof path !== "string") {
+    // Message payloads come from the frame untyped; anything that is not a
+    // string is refused rather than crashed on, so the frame still gets a
+    // blocked response instead of a hanging request.
+    return true;
+  }
+  return path.replace(/%5c/gi, "\\").includes("\\");
+}
+
+/**
  * Link schemes a sandboxed frame may ask the host to open on its behalf.
  *
  * One definition for both sides of the relay: the in-frame interceptor
@@ -478,6 +500,26 @@ export const WIDGET_CSP_META =
   `base-uri 'none'; form-action 'none'; frame-src 'none'">`;
 
 /**
+ * Content-Security-Policy for interactive app frames (app viewer, dynamic
+ * pages). Same network-denying posture as {@link WIDGET_CSP_META}: the frame
+ * reaches the daemon through the authenticated fetch relay, never the
+ * network directly, so `connect-src` falls back to `default-src 'none'` and
+ * every direct exfiltration channel (fetch, XHR, WebSocket, form post,
+ * pixel beacon) is refused. `blob:` joins the subresource allowlists because
+ * `window.vellum.asset()` resolves bundled assets into blob URLs that the
+ * frame loads as script, image, font, or media subresources.
+ *
+ * `base-uri` and `form-action` are listed explicitly for the same reason as
+ * {@link WIDGET_CSP_META}: neither falls back to `default-src`.
+ */
+export const APP_FRAME_CSP_META =
+  `<meta http-equiv="Content-Security-Policy" content="` +
+  `default-src 'none'; script-src 'unsafe-inline' blob:; ` +
+  `style-src 'unsafe-inline'; img-src data: blob:; ` +
+  `font-src data: blob:; media-src data: blob:; ` +
+  `base-uri 'none'; form-action 'none'; frame-src 'none'">`;
+
+/**
  * Inject the widget bridge into an inline visual's HTML.
  *
  * Unlike {@link injectBridge} there is no fetch proxy and no `window.vellum`
@@ -500,7 +542,7 @@ export function injectWidgetBridge(
 ): string {
   return prependScript(
     injectScript(
-      html,
+      prependDocumentStart(html, WIDGET_CSP_META),
       buildWidgetWidthFitScript() +
         buildWidgetHeightReporterScript(frameId) +
         buildWidgetPromptScript(frameId) +
@@ -510,7 +552,7 @@ export function injectWidgetBridge(
       // first measurement runs.
       { fallback: "append" },
     ),
-    WIDGET_CSP_META + buildStoragePolyfill() + head,
+    buildStoragePolyfill() + head,
   );
 }
 
@@ -764,6 +806,28 @@ export function prependScript(html: string, script: string): string {
   return script + html;
 }
 
+const DOCTYPE_RE = /<!doctype\s+[^>]*>/i;
+
+/**
+ * Prepend markup at the very start of the document, after any doctype.
+ *
+ * A `<meta>` CSP only governs tokens that follow it in the document, so it
+ * must precede every app-controlled token. Inserting after `<head>` is not
+ * enough: in a malformed document a `<script>` serialized before the
+ * `<head>` tag is relocated into the implicit head in source order and
+ * executes before a policy placed after the head open tag exists. Placing
+ * the markup after the doctype (or at index zero) puts it before
+ * everything; the parser still routes the meta into the implicit head.
+ */
+export function prependDocumentStart(html: string, markup: string): string {
+  const doctypeMatch = DOCTYPE_RE.exec(html);
+  if (doctypeMatch) {
+    const after = doctypeMatch.index + doctypeMatch[0].length;
+    return html.slice(0, after) + markup + html.slice(after);
+  }
+  return markup + html;
+}
+
 /**
  * Inject the full bridge into app HTML.
  *
@@ -778,7 +842,7 @@ export function injectBridge(
 ): string {
   return prependScript(
     injectScript(
-      html,
+      prependDocumentStart(html, APP_FRAME_CSP_META),
       buildBridgeLogicScript(frameId, options) +
         buildLinkInterceptorScript(frameId, {
           relayAppRoutes: options?.relayAppRoutes,

@@ -17,6 +17,9 @@ import {
   type ActivityStepsPayload,
 } from "@/stores/viewer-store";
 import {
+  coarseDuration,
+  isRenderableRunningCall,
+  type CoarseDuration,
   type ToolCallCardData,
   type ToolCallCardItem,
   type ToolCallCardStep,
@@ -30,7 +33,7 @@ import type {
 import type { ChatMessageToolCall } from "@/domains/chat/api/event-types";
 import { truncate } from "@/domains/chat/utils/truncate";
 import { isToolCallRunning } from "@/domains/chat/utils/tool-call-status";
-import { Trans, useTranslation } from "@/i18n";
+import { formatLocale, Trans, useTranslation, type TFunction } from "@/i18n";
 import { useActionDisplayLabel } from "@/domains/chat/components/tool-progress-card/action-display-label";
 import { openDetailSheetFromTrigger } from "@/domains/chat/utils/open-detail-sheet-from-trigger";
 
@@ -108,9 +111,9 @@ function buildDefaultItems(
  * Tally of how many terminal, non-thinking steps a run produced and how many
  * of those failed. Thinking steps are excluded — they carry no success/failure
  * semantics — so a `thinking → failed-bash` run reads as "every tool failed",
- * not "half failed". Shared with the activity-steps panel's summary header.
+ * not "half failed".
  */
-export function countStepOutcomes(steps: ToolCallCardStep[]): {
+function countStepOutcomes(steps: ToolCallCardStep[]): {
   total: number;
   failed: number;
 } {
@@ -161,9 +164,18 @@ export function deriveSummaryState(
   return "error";
 }
 
+/** A run's duration in the active locale's narrow units (`16s`, `3 min`). */
+function formatRunDuration(duration: CoarseDuration): string {
+  return new Intl.NumberFormat(formatLocale(), {
+    style: "unit",
+    unit: duration.unit,
+    unitDisplay: "narrow",
+  }).format(duration.value);
+}
+
 /**
- * Summary label for a whole activity run, used as the activity-steps panel's
- * header title.
+ * Summary label for a whole activity run: the activity-steps panel's header
+ * title, and the inline header's title once the run settles.
  *
  * Whenever we have timing data the summary reports how long the agent worked —
  * a live, ticking "Working for 16s" while running and a final "Worked for 16s"
@@ -172,30 +184,40 @@ export function deriveSummaryState(
  * outcome label, and the `warning` fallback spells out how many tools failed.
  */
 export function activityRunSummaryLabel(
+  t: TFunction<"chat">,
   state: ToolProgressCardState,
-  totalDurationLabel: string,
-  failedCount: number,
+  cardData: Pick<ToolCallCardData, "steps" | "totalDurationMs">,
 ): string {
+  const totalMs = cardData.totalDurationMs;
+  const duration = totalMs == null ? null : coarseDuration(totalMs);
   // While running, surface the live, ticking total ("Working for 12s") once we
-  // have at least a full second of work — below that the `<1s` label reads
-  // awkwardly, so we keep the bare "Working".
+  // have at least a full second of work; below that we keep the bare "Working".
   if (state === "loading") {
-    return totalDurationLabel && totalDurationLabel !== "<1s"
-      ? `Working for ${totalDurationLabel}`
-      : "Working";
+    return duration
+      ? t("multiActivityGroup.runSummary.workingFor", {
+          duration: formatRunDuration(duration),
+        })
+      : t("multiActivityGroup.runSummary.working");
   }
-  if (totalDurationLabel) {
-    return `Worked for ${totalDurationLabel}`;
+  if (duration) {
+    return t("multiActivityGroup.runSummary.workedFor", {
+      duration: formatRunDuration(duration),
+    });
+  }
+  if (totalMs != null) {
+    return t("multiActivityGroup.runSummary.workedUnderSecond");
   }
   switch (state) {
     case "warning":
-      return `${failedCount} ${failedCount === 1 ? "tool" : "tools"} failed`;
+      return t("multiActivityGroup.runSummary.toolsFailed", {
+        count: countStepOutcomes(cardData.steps).failed,
+      });
     case "error":
     case "denied":
-      return "Failed";
+      return t("multiActivityGroup.runSummary.failed");
     case "complete":
     default:
-      return "Completed";
+      return t("multiActivityGroup.runSummary.completed");
   }
 }
 
@@ -364,6 +386,14 @@ function UnifiedMultiActivityGroup(
     cardData.state,
     cardData.steps,
   );
+  // A settled run is titled by its summary, not its last step, so a run that
+  // ended on a thought does not keep reading "Thinking" once it is done. A
+  // denied call outranks `loading` in the shell state, so the run's own
+  // activity also has to be over.
+  const settled =
+    shellState !== "loading" &&
+    !active &&
+    !toolCalls.some(isRenderableRunningCall);
 
   const payload: ActivityStepsPayload = useMemo(
     () => ({
@@ -449,12 +479,18 @@ function UnifiedMultiActivityGroup(
         // the steps panel this header opens.
         hideStatusIndicator
         state={shellState}
-        currentStepTitle={cardData.currentStepTitle}
+        currentStepTitle={
+          settled
+            ? activityRunSummaryLabel(t, shellState, cardData)
+            : cardData.currentStepTitle
+        }
         currentStepInfo={headerInfo}
         stepCount={cardData.stepCount}
         // Clicking anywhere on the header toggles the steps side panel — the
         // timeline no longer expands in place beneath the header.
-        onHeaderClick={(event) => openDetailSheetFromTrigger(event, () => toggleActivitySteps(payload))}
+        onHeaderClick={(event) =>
+          openDetailSheetFromTrigger(event, () => toggleActivitySteps(payload))
+        }
         headerAriaLabel={t("multiActivityGroup.viewSteps")}
         headerActive={headerActive}
       />

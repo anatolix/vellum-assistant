@@ -1395,6 +1395,15 @@
   },
   "multiActivityGroup": {
     "dismissAria": "忽略",
+    "runSummary": {
+      "completed": "已完成",
+      "failed": "失败",
+      "toolsFailed": "{count, plural, other {# 个工具失败}}",
+      "workedFor": "运行了 {duration}",
+      "workedUnderSecond": "运行了不到 1 秒",
+      "working": "处理中",
+      "workingFor": "处理中，已用时 {duration}"
+    },
     "unknownCommandNudge": "此命令无法识别。<ruleLink>创建规则</ruleLink>以便下次分类。",
     "viewSteps": "查看步骤"
   },

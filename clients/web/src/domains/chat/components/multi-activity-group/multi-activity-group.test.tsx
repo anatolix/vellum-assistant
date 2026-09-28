@@ -20,7 +20,13 @@
 import { type ComponentProps } from "react";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 
-import { act, cleanup, fireEvent, render } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  waitFor,
+} from "@testing-library/react";
 
 import type { ChatMessageToolCall } from "@/domains/chat/api/event-types";
 import type { ToolCallCardItem } from "@/domains/chat/utils/tool-call-card-utils";
@@ -49,9 +55,11 @@ const { useChatSessionStore } =
   await import("@/domains/chat/chat-session-store");
 const { useAssistantFeatureFlagStore } =
   await import("@/stores/assistant-feature-flag-store");
+const { changeLocale } = await import("@/i18n");
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await changeLocale("en");
   // Reset drawer state and expansion state between tests so assertions
   // don't bleed across cases.
   useViewerStore.setState({
@@ -92,7 +100,7 @@ function renderCard(
 }
 
 describe("MultiActivityGroup — non-web tool group", () => {
-  test("terminal header promotes the bash command into the carousel", () => {
+  test("terminal header titles the run by its outcome and keeps the bash command", () => {
     const toolCalls = [
       makeToolCall({
         id: "tc-1",
@@ -105,8 +113,9 @@ describe("MultiActivityGroup — non-web tool group", () => {
       renderCard(toolCalls);
     // The unified group mounts the shared shell wrapper.
     expect(getByTestId("tool-progress-card-shell")).toBeTruthy();
-    // The phase title stays stable while the action wording follows the flag.
-    expect(getByText("Working")).toBeTruthy();
+    // A settled run reads as done, while the action wording follows the flag.
+    expect(getByText("Completed")).toBeTruthy();
+    expect(queryByText("Working")).toBeNull();
     expect(getByText("git status")).toBeTruthy();
     act(() => useAssistantFeatureFlagStore.setState({ sessionGroups: true }));
     expect(getByText("Running a command")).toBeTruthy();
@@ -134,6 +143,59 @@ describe("MultiActivityGroup — non-web tool group", () => {
     expect(getByText("Running a command")).toBeTruthy();
     // The timeline lives in the side panel — no step rows inline.
     expect(queryByTestId("tool-step-pill")).toBeNull();
+  });
+
+  test("the settled summary follows the active locale", async () => {
+    const toolCalls = [
+      makeToolCall({ id: "tc-1", name: "bash", status: "error" }),
+      makeToolCall({ id: "tc-2", name: "bash", status: "error" }),
+      makeToolCall({ id: "tc-3", name: "bash", status: "completed" }),
+    ];
+    const { getByText } = renderCard(toolCalls);
+    expect(getByText("2 tools failed")).toBeTruthy();
+
+    await act(async () => {
+      await changeLocale("es");
+    });
+    await waitFor(() => {
+      expect(getByText("2 herramientas fallaron")).toBeTruthy();
+    });
+  });
+
+  test("the settled duration is formatted in the active locale", async () => {
+    const toolCalls = [
+      makeToolCall({
+        id: "tc-1",
+        name: "bash",
+        status: "completed",
+        startedAt: 0,
+        completedAt: 180_000,
+      }),
+    ];
+    const { getByText } = renderCard(toolCalls);
+    expect(getByText("Worked for 3m")).toBeTruthy();
+
+    await act(async () => {
+      await changeLocale("es");
+    });
+    // ICU versions differ on the space before a narrow unit ("3 min" / "3min").
+    await waitFor(() => {
+      expect(getByText(/^Trabajó durante 3\s?min$/)).toBeTruthy();
+    });
+  });
+
+  test("a settled sub-second run has its own summary", () => {
+    const toolCalls = [
+      makeToolCall({
+        id: "tc-1",
+        name: "bash",
+        status: "completed",
+        startedAt: 0,
+        completedAt: 400,
+      }),
+    ];
+    const { getByText } = renderCard(toolCalls);
+    expect(getByText("Worked for <1s")).toBeTruthy();
   });
 
   test("renders no status indicator while running — the shimmering title is the signal", () => {
@@ -519,6 +581,26 @@ describe("MultiActivityGroup — subagent_spawn filtering", () => {
     // No "Spawning subagent" content in the header.
     expect(queryByText(/Spawning subagent/i)).toBeNull();
   });
+
+  test("a still-running subagent_spawn does not keep a finished header live", () => {
+    const toolCalls = [
+      makeToolCall({
+        id: "tc-1",
+        name: "subagent_spawn",
+        status: "running",
+        input: { label: "Investigate logs" },
+      }),
+      makeToolCall({
+        id: "tc-2",
+        name: "bash",
+        status: "completed",
+        input: { command: "ls" },
+      }),
+    ];
+    const { getByText, queryByText } = renderCard(toolCalls);
+    expect(getByText("Completed")).toBeTruthy();
+    expect(queryByText("Working")).toBeNull();
+  });
 });
 
 describe("MultiActivityGroup — unknown-command nudge", () => {
@@ -714,7 +796,7 @@ describe("MultiActivityGroup — ordered thinking items", () => {
 });
 
 describe("MultiActivityGroup — header reflects the latest step", () => {
-  test("a run ending in a thinking step shows 'Thinking' + the thinking text in the header", () => {
+  test("a live run ending in a thinking step shows 'Thinking' + the thinking text in the header", () => {
     const toolCalls = [
       makeToolCall({
         id: "tc-1",
@@ -729,7 +811,10 @@ describe("MultiActivityGroup — header reflects the latest step", () => {
       { kind: "toolCall", toolCall: toolCalls[0]! },
       { kind: "thinking", text: "Now I understand the current state." },
     ];
-    const { getByText, getByTestId } = renderCard(toolCalls, { items });
+    const { getByText, getByTestId } = renderCard(toolCalls, {
+      items,
+      active: true,
+    });
     // The header carousels to the latest (thinking) step.
     expect(getByText("Thinking")).toBeTruthy();
     expect(getByText("Now I understand the current state.")).toBeTruthy();
@@ -738,7 +823,52 @@ describe("MultiActivityGroup — header reflects the latest step", () => {
     expect(shell.querySelector("svg")).toBeTruthy();
   });
 
-  test("a run ending in a tool step keeps the tool title/info in the header", () => {
+  test("a settled run ending in a thinking step is titled by how long it worked, not 'Thinking'", () => {
+    const toolCalls = [
+      makeToolCall({
+        id: "tc-1",
+        name: "read_file",
+        status: "completed",
+        input: { path: "/tmp/state.txt" },
+        startedAt: 0,
+        completedAt: 2_000,
+      }),
+    ];
+    const items: ToolCallCardItem[] = [
+      { kind: "toolCall", toolCall: toolCalls[0]! },
+      { kind: "thinking", text: "Now I understand the current state." },
+    ];
+    const { getByText, queryByText } = renderCard(toolCalls, { items });
+    expect(queryByText("Thinking")).toBeNull();
+    expect(getByText(/^Worked for /)).toBeTruthy();
+    expect(getByText("Now I understand the current state.")).toBeTruthy();
+  });
+
+  test("a run still in flight after a denied call keeps its live title", () => {
+    const toolCalls = [
+      makeToolCall({
+        id: "tc-denied",
+        name: "bash",
+        status: "completed",
+        input: { command: "npm publish" },
+        confirmationDecision: "denied",
+        startedAt: 0,
+        completedAt: 2_000,
+      }),
+    ];
+    const items: ToolCallCardItem[] = [
+      { kind: "toolCall", toolCall: toolCalls[0]! },
+      { kind: "thinking", text: "I will try another way." },
+    ];
+    const { getByText, queryByText } = renderCard(toolCalls, {
+      items,
+      active: true,
+    });
+    expect(getByText("Thinking")).toBeTruthy();
+    expect(queryByText(/^Worked for |tool failed|^Failed$/)).toBeNull();
+  });
+
+  test("a live run ending in a tool step keeps the tool title/info in the header", () => {
     const toolCalls = [
       makeToolCall({
         id: "tc-1",
@@ -753,7 +883,10 @@ describe("MultiActivityGroup — header reflects the latest step", () => {
       { kind: "thinking", text: "Let me check the directory first." },
       { kind: "toolCall", toolCall: toolCalls[0]! },
     ];
-    const { getByText, queryByText } = renderCard(toolCalls, { items });
+    const { getByText, queryByText } = renderCard(toolCalls, {
+      items,
+      active: true,
+    });
     // The disabled feature keeps the stable Working phase and command detail.
     expect(getByText("Working")).toBeTruthy();
     expect(getByText("echo hi")).toBeTruthy();
@@ -781,9 +914,10 @@ describe("MultiActivityGroup - a web_fetch under the thinking gate", () => {
 
   test("says what it read, not that it thought", () => {
     useAssistantFeatureFlagStore.setState({ sendUserMessage: true });
-    const { getByTestId, queryByText, getByText } = renderCard([
-      fetchCall("completed"),
-    ]);
+    const { getByTestId, queryByText, getByText } = renderCard(
+      [fetchCall("completed")],
+      { active: true },
+    );
     expect(getByTestId("tool-progress-card-shell")).toBeTruthy();
     expect(getByText("Read the web")).toBeTruthy();
     expect(queryByText("Thinking")).toBeNull();
@@ -797,7 +931,15 @@ describe("MultiActivityGroup - a web_fetch under the thinking gate", () => {
   });
 
   test("is unchanged with the gate off", () => {
-    const { getByText } = renderCard([fetchCall("completed")]);
+    const { getByText } = renderCard([fetchCall("completed")], {
+      active: true,
+    });
     expect(getByText("Thinking")).toBeTruthy();
+  });
+
+  test("settles on the run summary once the run is done", () => {
+    const { getByText, queryByText } = renderCard([fetchCall("completed")]);
+    expect(getByText("Completed")).toBeTruthy();
+    expect(queryByText("Thinking")).toBeNull();
   });
 });

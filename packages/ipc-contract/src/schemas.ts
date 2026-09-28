@@ -416,7 +416,7 @@ export const companionPopoverSchema = z.discriminatedUnion("kind", [
         z.object({
           id: z.string().max(128),
           label: z.string().max(80),
-          style: z.enum(["primary", "secondary", "destructive"]),
+          style: z.enum(["primary", "secondary", "tertiary", "destructive"]),
         }),
       )
       .max(COMPANION_POPOVER_ACTIONS_MAX),

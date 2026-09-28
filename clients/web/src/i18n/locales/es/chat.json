@@ -2188,5 +2188,12 @@
   "emailNavItem": {
     "label": "Correo",
     "unpin": "Quitar Correo"
+  },
+  "voiceShortcutConfirmation": {
+    "title": "¿Iniciar un chat de voz?",
+    "detail": "Has usado el atajo de voz. Tu micrófono permanecerá encendido para hablar con tu asistente, incluso mientras usas otra aplicación. Finaliza la llamada para dejar de escuchar.",
+    "confirm": "Continuar",
+    "cancel": "Cancelar",
+    "always": "Iniciar siempre"
   }
 }

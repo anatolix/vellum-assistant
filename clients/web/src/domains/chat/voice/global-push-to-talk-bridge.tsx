@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 
+import { t } from "@/i18n";
+import {
+  isLiveVoiceSessionActive,
+  useLiveVoiceStore,
+} from "@/domains/chat/voice/live-voice/live-voice-store";
+import {
+  confirmVoiceShortcutStart,
+  withdrawVoiceShortcutConfirmation,
+} from "@/domains/chat/voice/voice-shortcut-confirmation";
+
 import type { DictationContext } from "@vellumai/assistant-api";
 import type {
   HotkeySelection,
@@ -252,10 +262,17 @@ export function GlobalPushToTalkBridge({
   enabled,
 }: GlobalPushToTalkBridgeProps) {
   const enabledRef = useRef(enabled);
+  const assistantIdRef = useRef(assistantId);
+  const voiceKeyStartPendingRef = useRef(false);
+  useEffect(() => {
+    assistantIdRef.current = assistantId;
+    return withdrawVoiceShortcutConfirmation;
+  }, [assistantId]);
   useEffect(() => {
     enabledRef.current = enabled;
     return () => {
       enabledRef.current = false;
+      withdrawVoiceShortcutConfirmation();
     };
   }, [enabled]);
   useVellumCommands({
@@ -368,6 +385,10 @@ export function GlobalPushToTalkBridge({
     key: enabled ? voiceKey : { kind: "off" },
     onRegistered: setVoiceKeyRegistered,
     onHoldStart: ({ selection }) => {
+      // A hold answers a start confirmation still up: the user moved on.
+      if (voiceKeyStartPendingRef.current) {
+        withdrawVoiceShortcutConfirmation();
+      }
       if (!enabled || companionIntroStaged()) {
         return;
       }
@@ -414,21 +435,51 @@ export function GlobalPushToTalkBridge({
       if (!enabled) {
         return;
       }
-      const state = await getCompanionState();
-      if (!enabledRef.current) {
+      // A second double tap while the confirmation is up takes it down.
+      if (voiceKeyStartPendingRef.current) {
+        withdrawVoiceShortcutConfirmation();
         return;
       }
-      if (state?.intro === "try") {
-        advanceCompanionIntro("try");
-        return;
+      voiceKeyStartPendingRef.current = true;
+      try {
+        const state = await getCompanionState();
+        if (!enabledRef.current || assistantIdRef.current !== assistantId) {
+          return;
+        }
+        const introOffer = state?.intro === "try";
+        if (!introOffer && (state?.intro != null || companionIntroStaged())) {
+          return;
+        }
+        if (!isLiveVoiceSessionActive(useLiveVoiceStore.getState().state)) {
+          const confirmed = await confirmVoiceShortcutStart({
+            title: t("chat:voiceShortcutConfirmation.title"),
+            detail: t("chat:voiceShortcutConfirmation.detail"),
+            confirm: t("chat:voiceShortcutConfirmation.confirm"),
+            cancel: t("chat:voiceShortcutConfirmation.cancel"),
+            always: t("chat:voiceShortcutConfirmation.always"),
+          });
+          if (
+            !confirmed ||
+            !enabledRef.current ||
+            assistantIdRef.current !== assistantId ||
+            (!introOffer && companionIntroStaged()) ||
+            isLiveVoiceSessionActive(useLiveVoiceStore.getState().state)
+          ) {
+            return;
+          }
+        }
+        if (introOffer) {
+          advanceCompanionIntro("try");
+          return;
+        }
+        toggleVoiceFromSurface(
+          (to, options) => navigateRef.current(to, options),
+          "voice_key",
+        );
+      } finally {
+        voiceKeyStartPendingRef.current = false;
+        withdrawVoiceShortcutConfirmation();
       }
-      if (state?.intro != null || companionIntroStaged()) {
-        return;
-      }
-      toggleVoiceFromSurface(
-        (to, options) => navigateRef.current(to, options),
-        "voice_key",
-      );
     },
     // Counted and nothing else. A tap asks for nothing here; the count is what
     // lets the companion's introduction show the key answering while it is

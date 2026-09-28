@@ -1,3 +1,5 @@
+import { availableParallelism } from "node:os";
+
 import { Glob } from "bun";
 
 export interface IsolatedTestOptions {
@@ -12,11 +14,19 @@ export async function runIsolatedTests({
   extraFiles = [],
 }: IsolatedTestOptions): Promise<void> {
   const args = process.argv.slice(2);
+  // Timing-sensitive suites (real timers, `waitFor` deadlines) fail once the
+  // cores are saturated, so the default leaves half of them free.
+  const defaultConcurrency = Math.min(
+    8,
+    Math.max(2, Math.floor(availableParallelism() / 2)),
+  );
   const concurrency = Math.max(
     1,
-    Number.parseInt(process.env.TEST_CONCURRENCY ?? "8", 10) || 8,
+    Number.parseInt(process.env.TEST_CONCURRENCY ?? "", 10) ||
+      defaultConcurrency,
   );
-  const files =
+  const shard = parseShard(process.env.TEST_SHARD);
+  const allFiles =
     args.length > 0
       ? args
       : [
@@ -29,6 +39,9 @@ export async function runIsolatedTests({
           ]),
           ...extraFiles,
         ].sort();
+  const files = shard
+    ? allFiles.filter((_, index) => index % shard.total === shard.index - 1)
+    : allFiles;
 
   let passed = 0;
   let failed = 0;
@@ -58,22 +71,28 @@ export async function runIsolatedTests({
     return true;
   }
 
-  for (let index = 0; index < files.length; index += concurrency) {
-    const batch = files.slice(index, index + concurrency);
-    await Promise.all(
-      batch.map(async (file) => {
-        if (await runFile(file)) {
-          passed++;
-        } else {
-          failed++;
-          failures.push(file);
-        }
-      }),
-    );
+  // A rolling pool keeps every slot busy, so a slow file occupies only its own
+  // slot while the others keep pulling work.
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (next < files.length) {
+      const file = files[next++];
+      if (await runFile(file)) {
+        passed++;
+      } else {
+        failed++;
+        failures.push(file);
+      }
+    }
   }
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, files.length) }, worker),
+  );
 
   console.log(
-    `\n${passed} passed, ${failed} failed (${files.length} test files)`,
+    `\n${passed} passed, ${failed} failed (${files.length} test files${
+      shard ? `, shard ${shard.index}/${shard.total}` : ""
+    })`,
   );
 
   if (failures.length > 0) {
@@ -83,4 +102,23 @@ export async function runIsolatedTests({
     }
     process.exit(1);
   }
+}
+
+/**
+ * Parses `TEST_SHARD=<index>/<total>` (1-based), which splits the sorted file
+ * list round-robin so CI can fan one suite out across parallel jobs.
+ */
+function parseShard(
+  value: string | undefined,
+): { index: number; total: number } | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const match = /^(\d+)\/(\d+)$/.exec(value);
+  const index = match ? Number(match[1]) : 0;
+  const total = match ? Number(match[2]) : 0;
+  if (index < 1 || index > total) {
+    throw new Error(`TEST_SHARD must look like "1/4", got "${value}"`);
+  }
+  return { index, total };
 }

@@ -2,14 +2,52 @@
 
 Signal-driven notification architecture where producers emit free-form events and an LLM-backed decision engine determines whether, where, and how to notify the user.
 
+## From me chat alerts
+
+With `assistant-initiated-threads` enabled, an `assistant.share` from a background,
+scheduled, or unresolved source can create a new chat in From me. The pipeline
+resolves that promotion once and applies it only to vellum conversation pairing.
+Ordinary shares retain their authored content and original urgency.
+
+A new chat qualifies for an alert only after its conversation and seed message
+are persisted and it belongs in From me: an assistant-initiated, visible,
+ungrouped chat. Reusing an existing chat, filing it elsewhere, pinning it, or
+failing to persist the seed does not enable this additional alert. An invalid
+reuse target that falls back to a newly created eligible chat does qualify.
+
+The successful creation makes the local intent non-silent. When vellum is
+selected and platform credentials are configured, routing can also add the
+existing mobile push channel. Explicit quiet intent, suppression, exclusive
+channel allowlists, and single-channel routing retain precedence. A platform
+route added solely for this feature is skipped if creation does not qualify;
+independently selected urgent or explicit delivery retains its existing policy.
+
+Both paths target the persisted new conversation and seed message. Replayed
+decisions reuse the original delivery audit and destination without creating
+another chat or seed. Shares retain their existing transcript, Home feed, and
+notification bell behavior; they are not classified as completion signals.
+
+Local delivery waits for the existing bounded platform outcome and preserves
+per-platform remote/local duplicate suppression. Missing tokens, disabled remote
+push, or failed platform delivery leave the local fallback available. Provider
+acceptance does not prove that the OS displayed a banner.
+
+iOS uses the existing APNs route and device registration. macOS uses the live
+native notification bridge while the application is running, including hidden
+or minimized windows; quitting the application ends that live-delivery path.
+Android, other Electron clients, and permitted open browser tabs share these
+channels and receive the same eligible events. Existing notification permission,
+active-conversation suppression, tap navigation, and logout behavior apply.
+Opening From me or reconnecting does not replay historical chats as alerts.
+
 ## Completion alerts
 
 `chat.assistant_reply`, `schedule.result`, and explicitly user-facing
 `activity.complete` signals use the available subset of `vellum` and
 `platform`. A self-hosted assistant can deliver through `vellum` without
 mobile push. `completion-policy.ts` owns local presentation: selected
-completions can banner at medium urgency, unrelated low/medium notifications
-remain silent, and explicitly quiet work stays silent. The broadcaster resolves
+completions can banner at medium urgency, and low/medium notifications without
+a completion or new From me chat remain silent, and explicitly quiet work stays silent. The broadcaster resolves
 the existing `silent` contract for the local intent and paired-conversation
 event; clients continue honoring it.
 
@@ -200,7 +238,7 @@ Before an adapter sends a notification, `pairDeliveryWithConversation()` (in `co
 
 - **Vellum (`start_new_conversation`)**:
   - A signal that sets `requiresConversation` gets a conversation of its own, created with its seed message before the send (`standard` unless the producer overrides `conversationType`). An explicit `reuse_existing` action appends to a valid target instead, and falls back to a new conversation (`conversationFallbackUsed: true`) when the target is stale.
-  - A signal that does not set it creates no conversation, except that with `assistant-initiated-threads` on, an `assistant.share` with no `conversationMetadata.source` of its own is promoted to one when its producing conversation is a background or scheduled run, or does not resolve (`withAssistantInitiatedThread()`). Otherwise its body is appended to the conversation that produced it (resolved from `sourceContextId`). A `chat.assistant_reply` appends nothing, because the full reply is already in that transcript.
+  - A signal that does not set it creates no conversation, except that with `assistant-initiated-threads` on, an `assistant.share` with no `conversationMetadata.source` of its own is promoted to one when its producing conversation is a background or scheduled run, or does not resolve (`resolveAssistantInitiatedThread()` in `assistant-initiated-thread.ts`). Otherwise its body is appended to the conversation that produced it (resolved from `sourceContextId`). A `chat.assistant_reply` appends nothing, because the full reply is already in that transcript.
 - **External channels (`continue_existing_conversation`)**: only the chat's home conversation is resolved, and nothing is written. The broadcaster records the delivered post as an assistant row once the channel acknowledges it (`recordDeliveredChannelPost`), so a failed or pending delivery never reads as something the assistant said.
 - **`push_only`** (platform) and **`not_deliverable`**: nothing is paired. Platform push deep-links through the vellum delivery's conversation.
 - **Guardian-request deliveries to channels** pair nothing either: they are projections of a canonical request, and only their vellum delivery carries a conversation (see `notifications/AGENTS.md`).

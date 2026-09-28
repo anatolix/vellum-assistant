@@ -3,9 +3,12 @@
  *
  * The log comes from `dmesg`, not `/dev/kmsg`: the device is not mounted in
  * the container, while `dmesg` uses the syslog syscall the container is
- * allowed. The log is per kernel, not per container, and `/proc/self/cgroup`
- * reads `/` inside the container, so kills are attributed by the cgroup
- * `memory.events` counter rather than by cgroup path.
+ * allowed. The log is per kernel, not per container. A kill is this
+ * container's when the kernel's `oom-kill:` header names a cgroup carrying
+ * this container's id, which the container learns from its own mount table
+ * since `/proc/self/cgroup` reads `/` inside a cgroup namespace. The kernel
+ * rate-limits that header in a burst, so header-less kills fall back to the
+ * cgroup `memory.events` counter.
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -13,6 +16,7 @@ import { dirname, join } from "node:path";
 
 import { getRawShareAnalytics } from "../platform/consent-cache.js";
 import { recordWatchdogEvent } from "../telemetry/watchdog-events-store.js";
+import { getContainerMemoryEvents } from "../util/cgroup-memory.js";
 import { getLogger } from "../util/logger.js";
 import { DAEMON_OOM_SCORE_ADJ } from "../util/oom-priority.js";
 import { getMonitoringDataDir } from "../util/platform.js";
@@ -27,6 +31,13 @@ const FALLBACK_SCAN_INTERVAL_MS = 60_000;
 /** The detail bag is capped at 4 KiB server-side. */
 const MAX_VICTIMS_IN_DETAIL = 10;
 const DMESG_TIMEOUT_MS = 5_000;
+/** Mounts whose source path the container runtime names after the container. */
+const CONTAINER_ID_MOUNTPOINTS = new Set([
+  "/etc/hosts",
+  "/etc/hostname",
+  "/etc/resolv.conf",
+  "/dev/termination-log",
+]);
 
 export interface KernelLogEntry {
   /** Seconds since boot, monotonic for the life of the kernel. */
@@ -41,9 +52,11 @@ export interface OomKill {
   oomScoreAdj: number | null;
   anonRssKb: number | null;
   totalVmKb: number | null;
+  /** Victim's cgroup from the `oom-kill:` header; null when the header was rate-limited away. */
+  memcg: string | null;
 }
 
-type Attribution = "cgroup_counter" | "kernel_log";
+type Attribution = "cgroup" | "cgroup_counter" | "kernel_log";
 
 /** `dmesg --json`: `{"dmesg":[{"pri":3,"time":44170.542,"msg":"..."}]}`. */
 export function parseDmesgJson(text: string): KernelLogEntry[] | null {
@@ -79,6 +92,7 @@ export function parseDmesgText(text: string): KernelLogEntry[] {
 }
 
 const OOM_KILL_RE = /[Oo]ut of memory: Killed process (\d+) \(([^)]*)\)(.*)$/;
+const OOM_HEADER_RE = /^oom-kill:.*task_memcg=([^,]*),task=[^,]*,pid=(\d+)/;
 
 function kb(fields: string, key: string): number | null {
   const match = new RegExp(`${key}:(\\d+)kB`).exec(fields);
@@ -86,24 +100,35 @@ function kb(fields: string, key: string): number | null {
 }
 
 export function oomKillsFromEntries(entries: KernelLogEntry[]): OomKill[] {
+  const sorted = [...entries].sort((a, b) => a.time - b.time);
+  // The header precedes its "Killed process" line and names the same pid.
+  const memcgByPid = new Map<number, string>();
   const kills: OomKill[] = [];
-  for (const entry of entries) {
+  for (const entry of sorted) {
+    const header = OOM_HEADER_RE.exec(entry.msg);
+    if (header) {
+      memcgByPid.set(parseInt(header[2], 10), header[1]);
+      continue;
+    }
     const kill = OOM_KILL_RE.exec(entry.msg);
     if (!kill) {
       continue;
     }
+    const pid = parseInt(kill[1], 10);
     const fields = kill[3];
     const adj = /oom_score_adj:(-?\d+)/.exec(fields);
     kills.push({
       time: entry.time,
-      pid: parseInt(kill[1], 10),
+      pid,
       comm: kill[2],
       oomScoreAdj: adj ? parseInt(adj[1], 10) : null,
       anonRssKb: kb(fields, "anon-rss"),
       totalVmKb: kb(fields, "total-vm"),
+      memcg: memcgByPid.get(pid) ?? null,
     });
+    memcgByPid.delete(pid);
   }
-  return kills.sort((a, b) => a.time - b.time);
+  return kills;
 }
 
 /** Null when `dmesg` is absent or lacks CAP_SYSLOG. */
@@ -132,6 +157,33 @@ export async function readKernelLog(): Promise<KernelLogEntry[] | null> {
   }
   const text = await run([]);
   return text != null ? parseDmesgText(text) : null;
+}
+
+/**
+ * Container ids from `/proc/self/mountinfo`: the runtime names the source of
+ * the hosts, hostname, resolv.conf and termination-log mounts after the
+ * container (Kata: `<id>-<hash>-hosts`; Docker: `.../containers/<id>/hosts`).
+ */
+export function parseOwnContainerIds(mountinfo: string): Set<string> {
+  const ids = new Set<string>();
+  for (const line of mountinfo.split("\n")) {
+    const fields = line.split(" ");
+    if (fields.length < 5 || !CONTAINER_ID_MOUNTPOINTS.has(fields[4])) {
+      continue;
+    }
+    for (const id of line.match(/[0-9a-f]{64}/g) ?? []) {
+      ids.add(id);
+    }
+  }
+  return ids;
+}
+
+function readOwnContainerIds(): Set<string> {
+  try {
+    return parseOwnContainerIds(readFileSync("/proc/self/mountinfo", "utf-8"));
+  } catch {
+    return new Set();
+  }
 }
 
 function readBootId(): string | null {
@@ -164,8 +216,20 @@ function writeCursor(path: string, cursor: Cursor): void {
   writeFileSync(path, JSON.stringify(cursor));
 }
 
+function memcgIsOurs(memcg: string, ids: ReadonlySet<string>): boolean {
+  for (const id of ids) {
+    if (memcg.includes(id)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export interface OomKillReporterOptions {
   readKernelLog?: () => Promise<KernelLogEntry[] | null>;
+  /** Cumulative cgroup oom_kill count, read after the log so it covers every logged kill. */
+  readKillCounter?: () => number | null;
+  readOwnContainerIds?: () => ReadonlySet<string>;
   readBootId?: () => string | null;
   shareAnalytics?: () => boolean | null;
   cursorPath?: string;
@@ -192,6 +256,10 @@ export function createOomKillReporter(
   options: OomKillReporterOptions = {},
 ): OomKillReporter {
   const read = options.readKernelLog ?? readKernelLog;
+  const readKillCounter =
+    options.readKillCounter ??
+    (() => getContainerMemoryEvents()?.oomKill ?? null);
+  const ownIds = options.readOwnContainerIds ?? readOwnContainerIds;
   const bootId = options.readBootId ?? readBootId;
   const shareAnalytics = options.shareAnalytics ?? getRawShareAnalytics;
   const cursorPath =
@@ -200,6 +268,17 @@ export function createOomKillReporter(
 
   let firstScan = true;
   let lastScanAt = 0;
+  let lastKillCounter: number | null = null;
+  /**
+   * Counter credit with no log line yet: the kernel prints the kill line
+   * before it increments the counter, so a kill between the log read and the
+   * counter read is counted but not yet visible. Credit is spent on the next
+   * scan and reported as unnamed if still unspent, so a kill that never logs
+   * a line cannot claim a neighbour's later.
+   */
+  let owed = 0;
+  /** A scan was skipped mid-way; the next tick scans regardless of the sampler. */
+  let scanDue = false;
   /** A report the telemetry store refused; retried before the next scan. */
   let pending: {
     report: OomKillReport;
@@ -269,29 +348,30 @@ export function createOomKillReporter(
         pending = null;
       }
 
-      const counterDelta = sample.deltas?.events?.oomKill ?? 0;
-      const countersAvailable = sample.events != null;
+      const sampleDelta = sample.deltas?.events?.oomKill ?? 0;
       if (
         !firstScan &&
-        counterDelta === 0 &&
+        !scanDue &&
+        sampleDelta === 0 &&
         now - lastScanAt < FALLBACK_SCAN_INTERVAL_MS
       ) {
         return null;
       }
-      const isFirstScan = firstScan;
-      firstScan = false;
-      lastScanAt = now;
+      scanDue = false;
 
       const entries = await read();
       const currentBootId = bootId();
       if (entries == null) {
-        if (counterDelta === 0) {
+        firstScan = false;
+        lastScanAt = now;
+        lastKillCounter = readKillCounter() ?? lastKillCounter;
+        if (sampleDelta === 0) {
           return null;
         }
         const report: OomKillReport = {
           attribution: "cgroup_counter",
           victims: [],
-          unnamed: counterDelta,
+          unnamed: sampleDelta,
         };
         const cursor = { bootId: currentBootId, lastTime: 0 };
         if (!queue(report, sample, daemonPid, cursor)) {
@@ -299,6 +379,23 @@ export function createOomKillReporter(
         }
         return report;
       }
+
+      // Read after the log so the count covers every line the log holds.
+      const killCounter = readKillCounter();
+      if (killCounter == null && sample.events != null) {
+        // One failed read of a counter that exists: try again next tick
+        // rather than treating every kill on the kernel as ours.
+        scanDue = true;
+        return null;
+      }
+      const isFirstScan = firstScan;
+      firstScan = false;
+      lastScanAt = now;
+      const counterDelta =
+        killCounter != null && lastKillCounter != null
+          ? Math.max(0, killCounter - lastKillCounter)
+          : null;
+      lastKillCounter = killCounter ?? lastKillCounter;
 
       const all = oomKillsFromEntries(entries);
       const maxTime = all.length > 0 ? all[all.length - 1].time : 0;
@@ -315,19 +412,46 @@ export function createOomKillReporter(
         bootId: currentBootId,
         lastTime: Math.max(sinceTime, maxTime),
       };
+      const ids = ownIds();
 
       let report: OomKillReport | null = null;
-      // The counter says how many were ours; older new kills are neighbours'.
-      if (counterDelta > 0) {
-        report = {
-          attribution: "cgroup_counter",
-          victims: fresh.slice(-counterDelta),
-          unnamed: Math.max(0, counterDelta - fresh.length),
-        };
-      } else if ((isFirstScan || !countersAvailable) && fresh.length > 0) {
+      if (counterDelta == null || isFirstScan) {
         // No counter to lean on: a kill that took the daemon down restarted
         // this monitor with it, and the new container's counter starts at 0.
-        report = { attribution: "kernel_log", victims: fresh, unnamed: 0 };
+        const ours = fresh.filter(
+          (kill) => kill.memcg == null || memcgIsOurs(kill.memcg, ids),
+        );
+        if (ours.length > 0) {
+          report = { attribution: "kernel_log", victims: ours, unnamed: 0 };
+        }
+        owed = 0;
+      } else {
+        const byHeader = fresh.filter(
+          (kill) => kill.memcg != null && memcgIsOurs(kill.memcg, ids),
+        );
+        const unknown = fresh.filter((kill) => kill.memcg == null);
+        // Header-attributed kills spend counter credit first; what is left
+        // names header-less kills oldest first. Header-less kills beyond the
+        // credit are neighbours', since our counter would have covered ours.
+        const carry = owed;
+        let credit = counterDelta + carry - byHeader.length;
+        const byCounter = unknown.slice(0, Math.max(0, credit));
+        credit = Math.max(0, credit - byCounter.length);
+        owed = Math.min(credit, counterDelta);
+        const unnamed = credit - owed;
+        const victims = [...byHeader, ...byCounter].sort(
+          (a, b) => a.time - b.time,
+        );
+        if (victims.length > 0 || unnamed > 0) {
+          report = {
+            attribution:
+              byCounter.length === 0 && unnamed === 0
+                ? "cgroup"
+                : "cgroup_counter",
+            victims,
+            unnamed,
+          };
+        }
       }
 
       if (report == null) {

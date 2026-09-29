@@ -28,6 +28,8 @@ import {
   computeLegacyManifestSha256,
   computeManifestChecksum,
   LegacyManifestSchema,
+  MANIFEST_MAX_BYTES,
+  MANIFEST_MAX_ENTRIES,
   ManifestSchema,
   type ManifestType,
   translateLegacyManifest,
@@ -74,21 +76,17 @@ export class StreamingValidationError extends Error {
 // Manifest validation
 // ---------------------------------------------------------------------------
 
-// Manifests are metadata only — typically tens to hundreds of KB even for
-// huge bundles. A 1 MiB cap is comfortably above realistic sizes and
-// protects against a malicious archive whose "manifest" is actually a
-// multi-GB stream intended to OOM the validator.
-const MANIFEST_MAX_BYTES = 1 * 1024 * 1024;
-
 /**
  * Drain the first tar entry — which MUST be `manifest.json` — and run the
  * full manifest-level validation pipeline:
  *   1. Entry name check.
- *   2. Size cap (1 MiB).
+ *   2. Size cap (`MANIFEST_MAX_BYTES`).
  *   3. JSON parse.
  *   4. Zod schema validation.
  *   5. Self-referencing `checksum` verification against the
  *      canonicalized JSON (minus that field).
+ *   6. Entry-count ceiling on `contents` (`maxEntries`, default
+ *      `MANIFEST_MAX_ENTRIES`).
  *
  * On success, returns the parsed manifest plus a `Map` keyed by archive
  * path that callers consult as each subsequent entry streams past.
@@ -98,7 +96,9 @@ const MANIFEST_MAX_BYTES = 1 * 1024 * 1024;
  */
 export async function readAndValidateManifest(
   first: StreamedTarEntry,
+  options: { maxEntries?: number } = {},
 ): Promise<ManifestReadResult> {
+  const maxEntries = options.maxEntries ?? MANIFEST_MAX_ENTRIES;
   if (first.header.name !== "manifest.json") {
     // Drain the body so the underlying tar extractor isn't left dangling
     // on backpressure before the caller reports the error.
@@ -184,6 +184,13 @@ export async function readAndValidateManifest(
       );
     }
     manifest = translateLegacyManifest(legacy);
+  }
+
+  if (manifest.contents.length > maxEntries) {
+    throw new StreamingValidationError(
+      "bundle_too_many_entries",
+      `bundle contains more than ${maxEntries} entries (declared: ${manifest.contents.length})`,
+    );
   }
 
   const expected = new Map<

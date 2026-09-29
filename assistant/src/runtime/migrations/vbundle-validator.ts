@@ -381,6 +381,33 @@ export function computeManifestChecksum(manifest: unknown): string {
 // Core validation
 // ---------------------------------------------------------------------------
 
+/**
+ * Hard caps on `manifest.json`, shared by the buffered and streaming
+ * validators so preflight and import agree on what is acceptable. The two
+ * are sized together: the manifest carries one `contents` entry (path,
+ * sha256, size) per bundled file at roughly 150 bytes each, so 200,000
+ * entries serialize to about 32 MiB.
+ *
+ * That absorbs a workspace with a stray dependency install or checked-out
+ * repo while still bounding the transient memory a hostile "manifest" can
+ * force the importer to hold (buffer, decoded string, parsed object,
+ * canonical re-serialization for the self-checksum) and the per-entry work
+ * it commits to, on a memory-constrained pod.
+ */
+export const MANIFEST_MAX_BYTES = 32 * 1024 * 1024;
+export const MANIFEST_MAX_ENTRIES = 200_000;
+
+export interface ValidateVBundleOptions {
+  /**
+   * Reject manifests over `MANIFEST_MAX_BYTES` or `MANIFEST_MAX_ENTRIES`.
+   * Preflights that precede a streaming import set this so they never
+   * approve a bundle the import will refuse. The buffered import path
+   * (`commitImport`) has no such ceilings, so it stays off there to keep
+   * existing large backups restorable.
+   */
+  enforceStreamingLimits?: boolean;
+}
+
 // Only manifest.json is structurally required. The DB and config live under
 // workspace/ (new format) or data/db/ + config/ (old format) — both are valid.
 const REQUIRED_ENTRIES = ["manifest.json"];
@@ -397,7 +424,10 @@ const MAX_DECOMPRESSED_SIZE = 2 * 1024 * 1024 * 1024;
  * 3. Manifest checksum (SHA-256 of canonicalized JSON with the `checksum` field set to empty string)
  * 4. Per-file content integrity (SHA-256 of each file vs manifest declaration)
  */
-export function validateVBundle(data: Uint8Array): VBundleValidationResult {
+export function validateVBundle(
+  data: Uint8Array,
+  { enforceStreamingLimits = false }: ValidateVBundleOptions = {},
+): VBundleValidationResult {
   const errors: ValidationError[] = [];
 
   // Step 1: Decompress gzip with size cap to prevent zip-bomb DoS
@@ -455,6 +485,17 @@ export function validateVBundle(data: Uint8Array): VBundleValidationResult {
   }
 
   // Step 4: Parse and validate manifest schema
+  if (
+    enforceStreamingLimits &&
+    manifestEntry.data.length > MANIFEST_MAX_BYTES
+  ) {
+    errors.push({
+      code: "MANIFEST_TOO_LARGE",
+      message: `manifest.json exceeds ${MANIFEST_MAX_BYTES} byte limit (${manifestEntry.data.length} bytes)`,
+      path: "manifest.json",
+    });
+    return { is_valid: false, errors };
+  }
   let manifestRaw: unknown;
   try {
     manifestRaw = JSON.parse(new TextDecoder().decode(manifestEntry.data));
@@ -521,6 +562,18 @@ export function validateVBundle(data: Uint8Array): VBundleValidationResult {
     // Translate to v1 so the rest of the pipeline (per-file hash + size
     // verification, refine rules) sees a uniform shape.
     manifest = translateLegacyManifest(legacy);
+  }
+
+  if (
+    enforceStreamingLimits &&
+    manifest.contents.length > MANIFEST_MAX_ENTRIES
+  ) {
+    errors.push({
+      code: "MANIFEST_TOO_MANY_ENTRIES",
+      message: `manifest.json declares more than ${MANIFEST_MAX_ENTRIES} entries (${manifest.contents.length})`,
+      path: "manifest.json",
+    });
+    return { is_valid: false, errors };
   }
 
   // Step 6: Verify per-file content integrity

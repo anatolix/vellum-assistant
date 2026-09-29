@@ -78,10 +78,16 @@ const USAGE_ATTRIBUTION_HEADER_NAMES = {
   subagentSpawnMode: "X-Vellum-Subagent-Spawn-Mode",
 } as const;
 
-/** Providers whose transports consume `promptCacheKey` (OpenAI Responses
- *  `prompt_cache_key`); `RetryProvider` derives it from `selectionSeed` for
- *  these only. */
-const PROMPT_CACHE_KEY_PROVIDERS = new Set(["openai", "openrouter"]);
+/** Providers whose transports consume `promptCacheKey` (OpenAI Responses /
+ *  Chat Completions `prompt_cache_key`); `RetryProvider` derives it from
+ *  `selectionSeed` for these only. `openai-compatible` is included so
+ *  self-hosted bridges (e.g. a Claude Code shim) receive a stable
+ *  per-conversation key and can pin server-side sessions / prompt caches to it. */
+const PROMPT_CACHE_KEY_PROVIDERS = new Set([
+  "openai",
+  "openrouter",
+  "openai-compatible",
+]);
 
 /** Providers that support the `effort` config (extended thinking / reasoning). */
 const EFFORT_SUPPORTED_PROVIDERS = new Set([

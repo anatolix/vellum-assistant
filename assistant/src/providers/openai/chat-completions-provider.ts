@@ -966,6 +966,15 @@ export class OpenAIChatCompletionsProvider implements Provider {
           maxTokens;
       }
 
+      // Per-conversation prompt-cache key (OpenAI Chat Completions
+      // `prompt_cache_key`). `RetryProvider` stamps it from the durable
+      // conversation id for providers in PROMPT_CACHE_KEY_PROVIDERS; omitted
+      // from the wire when absent.
+      const promptCacheKey = configObj?.promptCacheKey;
+      if (typeof promptCacheKey === "string" && promptCacheKey.length > 0) {
+        params.prompt_cache_key = promptCacheKey;
+      }
+
       // Profile-scoped token biasing (e.g. the `suppress-cjk` preset). Resolved
       // and gated to this provider family upstream in `RetryProvider`.
       if (logitBias) {

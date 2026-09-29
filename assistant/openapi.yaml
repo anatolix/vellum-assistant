@@ -6025,6 +6025,7 @@ paths:
                     - minimax
                     - atlascloud
                     - baseten
+                    - ionet
                     - poolside
                 connectionName:
                   type: string
@@ -16973,8 +16974,8 @@ paths:
             type: string
           description:
             "Filter by provider id. One of: anthropic, openai, gemini, ollama, fireworks, together, openrouter,
-            vercel-ai-gateway, litellm, opencode, openai-compatible, minimax, atlascloud, baseten, poolside, typesafe,
-            vellum"
+            vercel-ai-gateway, litellm, opencode, openai-compatible, minimax, atlascloud, baseten, ionet, poolside,
+            typesafe, vellum"
       responses:
         "200":
           description: Successful response
@@ -17246,8 +17247,8 @@ paths:
             type: string
           description:
             "Filter by provider. One of: anthropic, openai, gemini, ollama, fireworks, together, openrouter,
-            vercel-ai-gateway, litellm, opencode, openai-compatible, minimax, atlascloud, baseten, poolside, typesafe,
-            vellum, chatgpt"
+            vercel-ai-gateway, litellm, opencode, openai-compatible, minimax, atlascloud, baseten, ionet, poolside,
+            typesafe, vellum, chatgpt"
       responses:
         "200":
           description: Successful response
@@ -39425,6 +39426,7 @@ components:
         - minimax
         - atlascloud
         - baseten
+        - ionet
         - poolside
         - typesafe
         - vellum
@@ -39689,6 +39691,7 @@ components:
                     - minimax
                     - atlascloud
                     - baseten
+                    - ionet
                     - poolside
                 connectionName:
                   type: string
@@ -40077,6 +40080,7 @@ components:
                 - minimax
                 - atlascloud
                 - baseten
+                - ionet
                 - poolside
             - type: "null"
         connectionName:

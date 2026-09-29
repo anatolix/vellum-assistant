@@ -14,7 +14,9 @@
  */
 
 import { safeStringSlice } from "../util/unicode.js";
+
 const UNPARSEABLE_TOOL_ARGS_KEY = "_raw";
+const UNPARSEABLE_TOOL_ARGS_PREVIEW_LIMIT = 200;
 
 /**
  * Message emitted by the Anthropic SDK's stream accumulator when a tool_use
@@ -28,6 +30,32 @@ export const UNPARSEABLE_TOOL_ARGS_SDK_MESSAGE =
 /** Wrap raw, unparseable tool-call argument text in the marker shape. */
 export function wrapUnparseableToolArgs(raw: string): Record<string, unknown> {
   return { [UNPARSEABLE_TOOL_ARGS_KEY]: raw };
+}
+
+/**
+ * Bound an unparseable marker before it joins history, events, or audit logs.
+ * The prefix is enough to diagnose where JSON broke without retaining a
+ * multi-megabyte partial tool call in every downstream copy.
+ */
+export function boundUnparseableToolArgs(
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!isUnparseableToolArgs(input)) {
+    return input;
+  }
+  const raw = input[UNPARSEABLE_TOOL_ARGS_KEY];
+  const bounded = boundUnparseableToolArgsRaw(raw);
+  return bounded === raw ? input : wrapUnparseableToolArgs(bounded);
+}
+
+/**
+ * Bound raw malformed arguments for diagnostic copies that retain the provider
+ * response shape rather than the internal `_raw` marker shape.
+ */
+export function boundUnparseableToolArgsRaw(raw: string): string {
+  return raw.length > UNPARSEABLE_TOOL_ARGS_PREVIEW_LIMIT
+    ? `${safeStringSlice(raw, 0, UNPARSEABLE_TOOL_ARGS_PREVIEW_LIMIT)}…`
+    : raw;
 }
 
 /**
@@ -56,11 +84,7 @@ export function unparseableToolArgsMessage(
   toolName: string,
   raw: string,
 ): string {
-  const PREVIEW_LIMIT = 200;
-  const preview =
-    raw.length > PREVIEW_LIMIT
-      ? `${safeStringSlice(raw, 0, PREVIEW_LIMIT)}…`
-      : raw;
+  const preview = boundUnparseableToolArgsRaw(raw);
   return (
     `Error: the arguments for "${toolName}" were not valid JSON — the argument stream was malformed or truncated, so the tool was NOT executed. ` +
     `Received: ${preview || "(empty)"}\n` +

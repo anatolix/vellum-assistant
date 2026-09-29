@@ -13,6 +13,15 @@ export interface ShellOutputResult {
   isError: boolean;
 }
 
+function describeKill(signal: NodeJS.Signals): string {
+  const tag = `<command_killed signal="${signal}" />`;
+  const hint =
+    signal === "SIGKILL"
+      ? " A SIGKILL the command did not send itself usually means the system ran out of memory."
+      : "";
+  return `${tag}\nCommand was killed by ${signal} before it finished.${hint}`;
+}
+
 type StdioStream = "stdout" | "stderr";
 
 type DataListener = (data: Buffer | string) => void;
@@ -34,7 +43,11 @@ export function formatShellOutput(
   code: number | null,
   timedOut: boolean,
   timeoutSec: number,
-  options?: { truncated?: boolean; started?: boolean },
+  options?: {
+    truncated?: boolean;
+    started?: boolean;
+    signal?: NodeJS.Signals | null;
+  },
 ): ShellOutputResult {
   if (options?.started === false) {
     return {
@@ -66,6 +79,12 @@ export function formatShellOutput(
     statusParts.push(OUTPUT_TRUNCATED_TAG);
   }
 
+  const killSignal = timedOut ? null : (options?.signal ?? null);
+  if (killSignal) {
+    output += (output ? "\n" : "") + describeKill(killSignal);
+    statusParts.push(`<command_killed signal="${killSignal}" />`);
+  }
+
   if (!output.trim()) {
     if (code === 0) {
       output = "<command_completed />";
@@ -74,7 +93,7 @@ export function formatShellOutput(
       output = `${exitTag}\nCommand failed with exit code ${code}. No stdout or stderr output was produced.`;
       statusParts.push(exitTag);
     }
-  } else if (code !== 0 && !timedOut) {
+  } else if (code !== 0 && !timedOut && !killSignal) {
     statusParts.push(`<command_exit code="${code}" />`);
   }
 
@@ -148,7 +167,7 @@ export class BoundedStdioCollector {
     code: number | null,
     timedOut: boolean,
     timeoutSec: number,
-    options?: { started?: boolean },
+    options?: { started?: boolean; signal?: NodeJS.Signals | null },
   ): ShellOutputResult {
     return formatShellOutput(
       Buffer.concat(this.stdoutParts).toString(),
@@ -156,7 +175,11 @@ export class BoundedStdioCollector {
       code,
       timedOut,
       timeoutSec,
-      { truncated: this.truncated, started: options?.started },
+      {
+        truncated: this.truncated,
+        started: options?.started,
+        signal: options?.signal,
+      },
     );
   }
 }

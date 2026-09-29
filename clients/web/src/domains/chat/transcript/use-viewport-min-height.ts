@@ -16,9 +16,16 @@ import { recordUpdate } from "@/lib/commit-pressure";
  *   ways that introduce a frame of stale height, which would leak visible
  *   layout shift into the transcript the first time the latest-turn row is
  *   measured. We intentionally keep this hook simple and synchronous.
+ *
+ * `containerKey` re-binds the observer when the caller replaces the container
+ * element itself rather than resizing it: the transcript keys its scroll
+ * container on the conversation and can stay mounted through a conversation
+ * change (a draft resolving to its server id, or a switch into history that is
+ * already cached), which hands back a new node.
  */
 export function useViewportMinHeight(
   scrollContainerRef: RefObject<HTMLElement | null>,
+  containerKey?: string | null,
 ): number {
   const [height, setHeight] = useState<number>(0);
 
@@ -61,7 +68,7 @@ export function useViewportMinHeight(
     return () => {
       observer.disconnect();
     };
-  }, [scrollContainerRef]);
+  }, [containerKey, scrollContainerRef]);
 
   return height;
 }

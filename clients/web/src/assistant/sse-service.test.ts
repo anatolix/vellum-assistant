@@ -27,6 +27,7 @@ let lastSubscribeArgs: {
   assistantId: string;
 } | null = null;
 const cancelMock = mock(() => {});
+const probeMock = mock((_timeoutMs: number) => {});
 const subscribeEventsMock = mock(
   (
     assistantId: string,
@@ -44,7 +45,7 @@ const subscribeEventsMock = mock(
     activeOnReconnect = options?.onReconnect ?? null;
     activeOnStreamOpen = options?.onStreamOpen ?? null;
     activeOnStreamClose = options?.onStreamClose ?? null;
-    return { cancel: cancelMock };
+    return { cancel: cancelMock, probe: probeMock };
   },
 );
 mock.module("@/lib/streaming/stream-transport", () => ({
@@ -139,6 +140,7 @@ beforeEach(() => {
   activeOnStreamClose = null;
   lastSubscribeArgs = null;
   cancelMock.mockClear();
+  probeMock.mockClear();
   subscribeEventsMock.mockClear();
   checkAssistantMock.mockClear();
   resetReconnectCursorMock.mockClear();
@@ -768,6 +770,33 @@ describe("sseService.attach: background grace policy", () => {
     // reopens, and no sse.opened reconcile fan-out is triggered
     expect(cancelMock).toHaveBeenCalledTimes(0);
     expect(subscribeEventsMock).toHaveBeenCalledTimes(1);
+
+    // AND the kept socket is asked to prove it survived the background:
+    // iOS can drop a streaming fetch during a short background too, with
+    // nothing surfaced to JS, and without the probe that shows up as a
+    // 45s idle-watchdog wait before messages flow again
+    expect(probeMock).toHaveBeenCalledTimes(1);
+    expect(probeMock.mock.calls[0]?.[0]).toBeLessThan(45_000);
+
+    // AND a redundant second resume edge does not probe again: the hidden
+    // mark was consumed on the first edge
+    eventBus.publish("app.resume", { signal: "visibility" });
+    expect(probeMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("a resume with no preceding background does not probe", () => {
+    // GIVEN a live socket that was never hidden
+    nativeMobile = true;
+    sseService.attach("asst-1");
+
+    // WHEN a resume edge arrives anyway (e.g. `online`, or a visibility
+    // edge with no matching hidden)
+    eventBus.publish("app.resume", { signal: "online" });
+    eventBus.publish("app.resume", { signal: "visibility" });
+
+    // THEN there is no background to distrust, so the socket is left alone
+    expect(probeMock).toHaveBeenCalledTimes(0);
+    expect(cancelMock).toHaveBeenCalledTimes(0);
   });
 
   test("a resume after a long background replaces the frozen socket exactly once", () => {
@@ -788,6 +817,8 @@ describe("sseService.attach: background grace policy", () => {
     // than left in place until the 45s stream watchdog notices
     expect(cancelMock).toHaveBeenCalledTimes(1);
     expect(subscribeEventsMock).toHaveBeenCalledTimes(2);
+    // AND the dropped socket is not probed — it is already gone
+    expect(probeMock).toHaveBeenCalledTimes(0);
 
     // AND a redundant second resume neither bounces the fresh
     // connection nor re-runs the check: the hidden mark was consumed on

@@ -84,6 +84,8 @@ import {
 } from "@/domains/chat/utils/send-message-utils";
 import type { UIContext } from "@/domains/chat/turn-selectors";
 import { useComposerStore } from "@/domains/chat/composer-store";
+import { resolveDraftComposerConfiguration } from "@/domains/chat/utils/draft-composer-configuration";
+import type { Autonomy } from "@/domains/chat/utils/composer-configuration";
 import { getSoundManager } from "@/lib/sounds/sound-manager";
 import { getInterruptOnSend } from "@/domains/chat/hooks/use-interrupt-on-send";
 import { useMessageQueue } from "@/domains/chat/hooks/use-message-queue";
@@ -374,62 +376,7 @@ export function useSendMessage({
       if (useServerMint) {
         pendingDraftMintRef.current = requestConversationId;
       }
-      // A model profile the user picked in the composer before this
-      // conversation's row was available — a brand-new draft, or an existing
-      // conversation opened by URL while still loading (see
-      // `ComposerSettingsMenu`). Forward it so this turn, and the conversation's
-      // per-conversation override, use the chosen profile instead of the global
-      // default — covering the window before the menu's load-time promotion PUT
-      // lands. Keyed by id, so only this conversation's own stash is read.
-      const inferenceProfileForSend = useConversationStore
-        .getState()
-        .pendingDraftProfiles.get(requestConversationId);
-      // A per-chat plugin set the user picked in the composer before this
-      // conversation's row existed — mirrors `inferenceProfileForSend`. Only an
-      // EXPLICIT selection (an entry in the map, including an empty set) is
-      // forwarded; an untouched default has no entry and sends `undefined`.
-      // Gated on resolved daemon support — older daemons silently drop the
-      // field, so the version must hydrate before deciding (see
-      // `use-supports-new-chat-plugins`).
-      const draftPlugins = useConversationStore
-        .getState()
-        .pendingDraftPlugins.get(requestConversationId);
-      const enabledPluginsForSend =
-        draftPlugins && (await resolveSupportsNewChatPlugins())
-          ? [...draftPlugins].sort()
-          : undefined;
-      let postResult: Awaited<ReturnType<typeof postChatMessage>>;
-      try {
-        postResult = await postChatMessage(
-          requestAssistantId,
-          useServerMint ? null : requestConversationId,
-          content,
-          {
-            attachmentIds,
-            onboarding: onboardingContext ?? undefined,
-            clientMessageId,
-            inferenceProfile: inferenceProfileForSend,
-            enabledPlugins: enabledPluginsForSend,
-            hidden: isHidden,
-            bypassSecretCheck,
-            scripted,
-          },
-        );
-      } finally {
-        // Release the gate however the POST settles. A throw that skipped this
-        // would leave it held for the rest of the session, rejecting every
-        // later send for this draft with the "setting up your conversation"
-        // message. Clear only if we still own it: a re-mount or scope flip
-        // during the await could have already replaced it with a newer draft's
-        // mint.
-        if (
-          useServerMint &&
-          pendingDraftMintRef.current === requestConversationId
-        ) {
-          pendingDraftMintRef.current = null;
-        }
-      }
-      if (!postResult.ok) {
+      const failedSend = (error: ChatError): SendStreamResult => {
         if (!isCurrentSendScope()) {
           recordDiagnostic("send_error_ignored_inactive_conversation", {
             assistantId: requestAssistantId,
@@ -456,19 +403,97 @@ export function useSendMessage({
           }
           return { status: "ignored" };
         }
-        const detail = resolvePostError(
-          postResult.error.code,
-          postResult.error.detail,
-          "Something went wrong. Please try again.",
-        );
         endTurn({ conversationId: requestConversationId, reason: "error" });
-        return {
-          status: "failed",
-          error: {
-            message: detail,
-            ...(postResult.error.code ? { code: postResult.error.code } : {}),
+        return { status: "failed", error };
+      };
+      let autonomyForSend: Autonomy | undefined;
+      let inferenceProfileForSend: string | undefined;
+      let draftPlugins: Set<string> | undefined;
+      let postResult: Awaited<ReturnType<typeof postChatMessage>>;
+      try {
+        try {
+          await resolveDraftComposerConfiguration(
+            queryClient,
+            requestAssistantId,
+            requestConversationId,
+          );
+        } catch (error) {
+          captureError(error, { context: "load_draft_composer_configuration" });
+          return failedSend({
+            message: t("chat:composerConfiguration.preferencesUnavailable"),
+          });
+        }
+        if (
+          composerSessionGeneration !==
+          useComposerStore.getState().sessionGeneration
+        ) {
+          return { status: "ignored" };
+        }
+        autonomyForSend = useConversationStore
+          .getState()
+          .pendingDraftAutonomy.get(requestConversationId);
+        inferenceProfileForSend = useConversationStore
+          .getState()
+          .pendingDraftProfiles.get(requestConversationId);
+        // A per-chat plugin set the user picked in the composer before this
+        // conversation's row existed, mirroring `inferenceProfileForSend`. Only an
+        // EXPLICIT selection (an entry in the map, including an empty set) is
+        // forwarded; an untouched default has no entry and sends `undefined`.
+        // Gated on resolved daemon support. Older daemons silently drop the
+        // field, so the version must hydrate before deciding (see
+        // `use-supports-new-chat-plugins`).
+        draftPlugins = useConversationStore
+          .getState()
+          .pendingDraftPlugins.get(requestConversationId);
+        const enabledPluginsForSend =
+          draftPlugins && (await resolveSupportsNewChatPlugins())
+            ? [...draftPlugins].sort()
+            : undefined;
+        if (
+          composerSessionGeneration !==
+          useComposerStore.getState().sessionGeneration
+        ) {
+          return { status: "ignored" };
+        }
+        postResult = await postChatMessage(
+          requestAssistantId,
+          useServerMint ? null : requestConversationId,
+          content,
+          {
+            attachmentIds,
+            onboarding: onboardingContext ?? undefined,
+            clientMessageId,
+            inferenceProfile: inferenceProfileForSend,
+            riskThreshold: autonomyForSend,
+            enabledPlugins: enabledPluginsForSend,
+            hidden: isHidden,
+            bypassSecretCheck,
+            scripted,
           },
-        };
+        );
+      } finally {
+        // Release the gate however the POST settles. A throw that skipped this
+        // would leave it held for the rest of the session, rejecting every
+        // later send for this draft with the "setting up your conversation"
+        // message. Clear only if we still own it: a re-mount or scope flip
+        // during the await could have already replaced it with a newer draft's
+        // mint.
+        if (
+          useServerMint &&
+          pendingDraftMintRef.current === requestConversationId
+        ) {
+          pendingDraftMintRef.current = null;
+        }
+      }
+      if (!postResult.ok) {
+        return failedSend({
+          message: resolvePostError(
+            postResult.error.code,
+            postResult.error.detail,
+            "Something went wrong. Please try again.",
+          ),
+          ...(postResult.error.code ? { code: postResult.error.code } : {}),
+        });
       }
       if (
         composerSessionGeneration !==
@@ -477,6 +502,16 @@ export function useSendMessage({
         return { status: "ignored" };
       }
       // Success — drain the ref so subsequent messages omit the field.
+      if (
+        autonomyForSend !== undefined &&
+        useConversationStore
+          .getState()
+          .pendingDraftAutonomy.get(requestConversationId) === autonomyForSend
+      ) {
+        useConversationStore
+          .getState()
+          .clearPendingDraftAutonomy(requestConversationId);
+      }
       pendingOnboardingContextRef.current = null;
       // The draft's stashed profile (if any) has now been persisted on the
       // minted conversation; drop this draft's entry so it can't re-apply to a
@@ -621,6 +656,7 @@ export function useSendMessage({
     [
       activeConversationId,
       assistantId,
+      queryClient,
       startReconciliationLoop,
       surfaceConversationAfterUserSend,
     ],
@@ -1226,6 +1262,17 @@ export function useSendMessage({
           // draft id after the POST already read the stash — re-key it to the
           // minted id so the composer's promotion effect persists it now that
           // the real row exists (ATL-1136).
+          const stashedAutonomy = useConversationStore
+            .getState()
+            .pendingDraftAutonomy.get(activeConversationId);
+          if (stashedAutonomy !== undefined) {
+            useConversationStore
+              .getState()
+              .setPendingDraftAutonomy(newConversationId, stashedAutonomy);
+            useConversationStore
+              .getState()
+              .clearPendingDraftAutonomy(activeConversationId);
+          }
           const stashedProfile = useConversationStore
             .getState()
             .pendingDraftProfiles.get(activeConversationId);

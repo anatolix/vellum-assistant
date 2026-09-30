@@ -61,6 +61,18 @@ const NATIVE_MOBILE_HIDDEN_TEARDOWN_GRACE_MS = 60_000;
 // deliberately; below it the socket is assumed healthy and kept as is.
 const SUSPECT_SOCKET_AFTER_MS = 30_000;
 
+// Below `SUSPECT_SOCKET_AFTER_MS` the socket is kept, but "kept" is not
+// "known alive": iOS can drop a streaming fetch during a background of
+// any length, again with nothing surfaced to JavaScript. Rather than
+// bounce every brief app switch (a reconnect fans out a full reconcile
+// across domains), ask the transport to prove the socket is alive within
+// about one daemon heartbeat interval (7 s, plus margin). A live socket
+// answers with its next heartbeat and nothing else happens; a dead one
+// trips the watchdog and reconnects in ~12 s instead of the 45 s idle
+// window — which users otherwise see as "messages arrive late unless I
+// switch conversations".
+const RESUME_PROBE_TIMEOUT_MS = 12_000;
+
 // Test-only override of the resolved grace window; `null` means use the
 // platform default.
 let hiddenTeardownGraceOverrideMs: number | null = null;
@@ -370,6 +382,11 @@ export const sseService: SseService = {
         // below treat this as a down connection rather than trusting a
         // handle that will never deliver another frame.
         teardown();
+      } else if (current !== null && hiddenSince !== null) {
+        // Short background: the socket is kept, but it must prove it
+        // survived. `hiddenSince` was consumed above, so this runs once
+        // per background regardless of how many resume edges arrive.
+        current.probe(RESUME_PROBE_TIMEOUT_MS);
       }
       if (now - lastAppResumeAt < RESUME_DEDUP_WINDOW_MS) {
         // Inside the dedup window. This collapses a redundant second resume

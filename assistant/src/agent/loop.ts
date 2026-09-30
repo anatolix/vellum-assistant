@@ -2032,11 +2032,6 @@ export class AgentLoop {
             providerConfig.selectionSeed = this.conversationId;
             providerConfig.conversationId = this.conversationId;
           }
-          // Actor trust class of the turn. Stripped from the wire body by
-          // `RetryProvider`; `openai-compatible` transports forward it as the
-          // `X-Vellum-Trust` header so a self-hosted bridge can scope tools it
-          // exposes to the model (memory only for the guardian, etc.).
-          providerConfig.actorTrustClass = trust.trustClass;
         }
 
         // Per-call inference-profile override. The resolver layers

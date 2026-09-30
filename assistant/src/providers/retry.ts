@@ -676,21 +676,6 @@ function normalizeSendMessageOptions(
     nextConfig.promptCacheKey = config.selectionSeed;
   }
 
-  // Forward the turn's actor trust class to self-hosted bridges as a header.
-  // Header only — never a body field — and only for `openai-compatible`, so
-  // no third-party API sees it. `actorTrustClass` itself is stripped below.
-  if (
-    providerName === "openai-compatible" &&
-    typeof config.actorTrustClass === "string" &&
-    config.actorTrustClass.length > 0
-  ) {
-    nextConfig.requestHeaders = {
-      ...((nextConfig.requestHeaders as Record<string, string> | undefined) ?? {}),
-      "X-Vellum-Trust": config.actorTrustClass,
-    };
-  }
-  delete nextConfig.actorTrustClass;
-
   if (providerName === "opencode") {
     const conversationId =
       typeof config.conversationId === "string"

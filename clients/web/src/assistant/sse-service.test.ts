@@ -81,7 +81,11 @@ mock.module("@/lib/streaming/reconnect-cursor", () => ({
   resetReconnectCursor: resetReconnectCursorMock,
 }));
 
-const { sseService, __setHiddenTeardownGraceMsForTesting } = await import(
+const {
+  sseService,
+  __setHiddenTeardownGraceMsForTesting,
+  __setGiveUpReopenIntervalMsForTesting,
+} = await import(
   "@/assistant/sse-service"
 );
 
@@ -755,6 +759,49 @@ describe("sseService.attach: background grace policy", () => {
     expect(cancelMock).toHaveBeenCalledTimes(1);
   });
 
+  test("a resume with no hidden mark still probes the kept socket", () => {
+    // GIVEN the app came to the foreground without app.hidden ever firing
+    // (screen lock with the app in front, a sleep that froze JS first)
+    nativeMobile = true;
+    sseService.attach("asst-1");
+    activeOnStreamOpen!();
+    probeMock.mockClear();
+
+    // WHEN a foreground resume arrives
+    eventBus.publish("app.resume", { signal: "app_state" });
+
+    // THEN the socket is kept but asked to prove it is alive
+    expect(cancelMock).toHaveBeenCalledTimes(0);
+    expect(subscribeEventsMock).toHaveBeenCalledTimes(1);
+    expect(probeMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("reopens on a slow timer after the transport gives up", async () => {
+    // GIVEN an attached service whose transport exhausted its retries, on
+    // a client that never changes visibility (a tablet on a stand)
+    __setGiveUpReopenIntervalMsForTesting(20);
+    try {
+      const detach = sseService.attach("asst-1");
+      activeOnStreamOpen!();
+      activeOnError!(new Error("retries exhausted"));
+      expect(subscribeEventsMock).toHaveBeenCalledTimes(1);
+
+      // WHEN the give-up interval elapses with no other trigger
+      await new Promise((r) => setTimeout(r, 40));
+
+      // THEN a fresh connection is opened without any user action
+      expect(subscribeEventsMock).toHaveBeenCalledTimes(2);
+
+      // AND detach cancels a pending retry
+      activeOnError!(new Error("retries exhausted again"));
+      detach();
+      await new Promise((r) => setTimeout(r, 40));
+      expect(subscribeEventsMock).toHaveBeenCalledTimes(2);
+    } finally {
+      __setGiveUpReopenIntervalMsForTesting(null);
+    }
+  });
+
   test("a resume after a short background keeps the live socket", () => {
     // GIVEN a native app switch shorter than the suspect threshold
     nativeMobile = true;
@@ -784,17 +831,18 @@ describe("sseService.attach: background grace policy", () => {
     expect(probeMock).toHaveBeenCalledTimes(1);
   });
 
-  test("a resume with no preceding background does not probe", () => {
-    // GIVEN a live socket that was never hidden
+  test("an online resume alone does not probe the kept socket", () => {
+    // GIVEN a live socket and no foreground edge
     nativeMobile = true;
     sseService.attach("asst-1");
+    activeOnStreamOpen!();
 
-    // WHEN a resume edge arrives anyway (e.g. `online`, or a visibility
-    // edge with no matching hidden)
+    // WHEN only a network transition arrives (the app may still be in the
+    // background, where a probe would abort a socket the OS is about to
+    // freeze anyway)
     eventBus.publish("app.resume", { signal: "online" });
-    eventBus.publish("app.resume", { signal: "visibility" });
 
-    // THEN there is no background to distrust, so the socket is left alone
+    // THEN the socket is left alone
     expect(probeMock).toHaveBeenCalledTimes(0);
     expect(cancelMock).toHaveBeenCalledTimes(0);
   });

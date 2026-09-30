@@ -128,6 +128,8 @@ const DENYLIST_LOCATIONS = `    location = /auth/token { return 404; }
     location = /v1/remote-web/pairing-requests/deny/ { return 404; }
     location = /v1/remote-web/pairing-verification { return 404; }
     location = /v1/remote-web/pairing-verification/ { return 404; }
+    location = /v1/shared/invites/redeem { return 404; }
+    location = /v1/shared/invites/redeem/ { return 404; }
     location ^~ /assistant/__local/ { return 404; }
     location ^~ /assistant/__gateway/ { return 404; }
     location ^~ /assistant/__gateway-paired/ { return 404; }`;
@@ -180,7 +182,7 @@ function remoteWebIngressConfig(
  * fingerprint matches, so this must change whenever the generated index or
  * nginx template does.
  */
-export const EDGE_TEMPLATE_VERSION = 7;
+export const EDGE_TEMPLATE_VERSION = 8;
 
 /**
  * Stable fingerprint of the SPA config injected into the served index and

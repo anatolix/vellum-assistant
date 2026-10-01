@@ -6,6 +6,8 @@
  *
  * Reference: https://docs.allauth.org/en/latest/headless/openapi-specification/
  */
+import { z } from "zod";
+
 import type {
   Authenticated,
   EmailAddress,
@@ -15,6 +17,7 @@ import type {
 import {
   deleteAllauthByClientV1AuthSession,
   getAllauthByClientV1AuthSession,
+  getAllauthByClientV1Config,
   getAllauthByClientV1AuthProviderSignup,
   postAllauthByClientV1AuthProviderSignup,
 } from "@/generated/auth/sdk.gen";
@@ -73,6 +76,35 @@ export async function logout(): Promise<AllauthResult> {
 
   if (response?.status === 401) {
     return { ok: true, data: {} };
+  }
+
+  return errorResult(error, response?.status);
+}
+
+/** The slice of allauth's configuration the app consumes. */
+const AuthConfigurationSchema = z.object({
+  account: z.object({
+    is_open_for_signup: z.boolean(),
+  }),
+});
+
+export type AuthConfiguration = z.infer<typeof AuthConfigurationSchema>;
+
+/**
+ * The allauth configuration the platform exposes to its frontends. Public: no
+ * session needed. A payload missing the consumed fields is an error result,
+ * never a partial success.
+ */
+export async function getAuthConfig(): Promise<
+  AllauthResult<AuthConfiguration>
+> {
+  const { data, error, response } = await getAllauthByClientV1Config({
+    path: { client: allauthClient() },
+  });
+
+  const parsed = AuthConfigurationSchema.safeParse(data?.data);
+  if (parsed.success) {
+    return { ok: true, data: parsed.data };
   }
 
   return errorResult(error, response?.status);

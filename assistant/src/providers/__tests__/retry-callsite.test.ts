@@ -1494,3 +1494,52 @@ describe("RetryProvider — no callSite (pre-resolved config passes through)", (
 // level, and bun's `mock.module` leaks across files in a single suite
 // run — that pollutes `inference.test.ts` (which exercises the real
 // SQLite-backed `getConnection`).
+
+describe("local shim effort transport", () => {
+  test("passes all effort levels to Claude and Codex over HTTP", async () => {
+    const { OpenAIChatCompletionsProvider } =
+      await import("../openai/chat-completions-provider.js");
+    const requests: Array<Record<string, unknown>> = [];
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      async fetch(request) {
+        requests.push((await request.json()) as Record<string, unknown>);
+        return new Response(
+          'data: {"id":"mock","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+          { headers: { "Content-Type": "text/event-stream" } },
+        );
+      },
+    });
+    try {
+      for (const model of ["claude-opus", "gpt-6-astra"]) {
+        const inner = new OpenAIChatCompletionsProvider("not-needed", model, {
+          providerName: "openai-compatible",
+          maxReasoningEffort: "max",
+          baseURL: `http://127.0.0.1:${server.port}/v1`,
+        });
+        const wrapped = new RetryProvider(inner);
+        for (const effort of [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+        ]) {
+          await wrapped.sendMessage(DUMMY_MESSAGES, {
+            config: {
+              model,
+              effort,
+              thinking: { enabled: false },
+              conversationId: "effort-regression",
+            },
+          });
+          expect(requests.at(-1)?.reasoning_effort).toBe(effort);
+        }
+      }
+    } finally {
+      server.stop(true);
+    }
+  });
+});

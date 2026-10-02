@@ -265,9 +265,11 @@ describe("geminiThinkingLevels", () => {
       "medium",
       "high",
     ]);
-    expect(
-      geminiThinkingLevels("gemini-3.1-pro-preview-customtools"),
-    ).toEqual(["low", "medium", "high"]);
+    expect(geminiThinkingLevels("gemini-3.1-pro-preview-customtools")).toEqual([
+      "low",
+      "medium",
+      "high",
+    ]);
   });
 
   test("gemini-3.8-flash excludes 'minimal'", () => {
@@ -292,4 +294,19 @@ describe("geminiThinkingLevels", () => {
       "high",
     ]);
   });
+});
+
+test("openai-compatible shims expose effort without a conflicting thinking toggle", () => {
+  for (const model of [
+    "claude-opus",
+    "claude-sonnet",
+    "claude-fable",
+    "claude-haiku",
+    "gpt-6-astra",
+    "gpt-6.1-sol",
+  ]) {
+    const vis = resolveProfileParamVisibility("openai-compatible", model);
+    expect(vis.effort).toBe(true);
+    expect(vis.thinking).toBe(false);
+  }
 });

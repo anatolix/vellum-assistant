@@ -10,6 +10,12 @@
  * emission order. */
 @custom-variant native-mobile (&:is(:root[data-native-platform="ios"] *, :root[data-native-platform="android"] *));
 
+/* Native iOS chat text is larger than the shared desktop and web scale. */
+:root[data-native-platform="ios"] {
+  --text-chat-size: 19px;
+  --text-chat-line-height: 28px;
+}
+
 /* The design library's `accent` button is filled from `--vbtn-accent*`, a
  * colour it leaves to the app. The app's accent is the assistant's own (see
  * `use-avatar-accent-var.ts`): the fill that can carry a label, that label's

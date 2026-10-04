@@ -12,13 +12,14 @@ type CreateParams = Record<string, unknown> & {
   };
 };
 
-function captureProvider(): {
+function captureProvider(providerName = "openai-compatible"): {
   provider: OpenAIChatCompletionsProvider;
   seen: () => CreateParams | undefined;
 } {
   const provider = new OpenAIChatCompletionsProvider(
     "test-key",
     "qwen/qwen3-8b",
+    { providerName },
   );
   let seenParams: CreateParams | undefined;
   (
@@ -97,6 +98,16 @@ describe("chat-completions _vellum source ids", () => {
         { index: 4, source_ids: ["u2"] },
       ],
     });
+  });
+
+  test("omits _vellum on a real upstream even when the profile sets the flag", async () => {
+    const { provider, seen } = captureProvider("openrouter");
+    await provider.sendMessage(taggedHistory(), {
+      systemPrompt: "sys",
+      config: { exportSourceIds: true },
+    });
+    expect(seen()).toBeDefined();
+    expect(seen()?._vellum).toBeUndefined();
   });
 
   test("omits _vellum when exportSourceIds is not set", async () => {

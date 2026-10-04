@@ -574,6 +574,14 @@ export const LLMConfigBase = z.object({
    * resolved configs when a layer sets it.
    */
   disableCache: z.boolean().optional(),
+  /**
+   * [local patch: shim source ids] Opt this config in to the non-standard
+   * `_vellum` body field (persisted row ids per wire message) on the
+   * openai-compatible Chat Completions path. Set it on profiles that point at
+   * a local shim which understands the field; never on a real upstream API.
+   * Optional (no schema default) so it only appears when a layer sets it.
+   */
+  exportSourceIds: z.boolean().optional(),
 });
 export type LLMConfigBase = z.infer<typeof LLMConfigBase>;
 
@@ -598,6 +606,7 @@ export const LLMConfigFragment = z
     openrouter: OpenRouterDeepPartialSchema.optional(),
     logitBias: LogitBiasPresetSchema.optional(),
     disableCache: z.boolean().optional(),
+    exportSourceIds: z.boolean().optional(),
   })
   .meta({ id: "LLMConfigFragment" });
 export type LLMConfigFragment = z.infer<typeof LLMConfigFragment>;

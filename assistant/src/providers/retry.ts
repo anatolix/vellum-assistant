@@ -582,8 +582,7 @@ function canReRouteToFallbackProfile(options?: SendMessageOptions): boolean {
     return false;
   }
   const callSiteConfig = getConfig().llm.callSites?.[config.callSite] as
-    | Record<string, unknown>
-    | undefined;
+    Record<string, unknown> | undefined;
   return !hasExactRoutePin(callSiteConfig);
 }
 
@@ -705,10 +704,6 @@ function normalizeSendMessageOptions(
   // [local patch: codex-shim] openai-compatible shims learn the call-site (compactionAgent →
   // compact the shim's own session instead of running a normal turn) and the conversation id.
   if (providerName === "openai-compatible") {
-    // [local patch: shim source ids] shims get persisted row ids per wire
-    // message (`_vellum` body field) so they can match history by id, not
-    // only by text hash.
-    nextConfig.exportSourceIds = true;
     const extra: Record<string, string> = {};
     if (typeof config.callSite === "string" && config.callSite.length > 0) {
       extra["X-Call-Site"] = config.callSite;
@@ -831,6 +826,16 @@ function normalizeSendMessageOptions(
       resolved.disableCache !== undefined
     ) {
       nextConfig.disableCache = resolved.disableCache;
+    }
+    // [local patch: shim source ids] Not a wire field either: the profile
+    // opts in (`exportSourceIds: true` on profiles that point at a local
+    // shim), and the Chat Completions client turns it into the `_vellum`
+    // body field for openai-compatible dispatch only.
+    if (
+      nextConfig.exportSourceIds === undefined &&
+      resolved.exportSourceIds !== undefined
+    ) {
+      nextConfig.exportSourceIds = resolved.exportSourceIds;
     }
     // Forward OpenRouter-only routing preferences so `OpenRouterProvider` can
     // translate `openrouter.only` into the wire-format `provider: { only: [...] }`
@@ -970,8 +975,7 @@ function normalizeSendMessageOptions(
   const forcedToolModel =
     typeof nextConfig.model === "string" ? nextConfig.model : "";
   const forcedToolChoice = nextConfig.tool_choice as
-    | Record<string, unknown>
-    | undefined;
+    Record<string, unknown> | undefined;
   if (
     forcedToolChoice != null &&
     (forcedToolChoice.type === "tool" || forcedToolChoice.type === "any") &&

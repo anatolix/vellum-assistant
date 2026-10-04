@@ -241,6 +241,47 @@ describe("RetryProvider — callSite resolution", () => {
     expect(config.conversationId).toBeUndefined();
   });
 
+  // [local patch: shim source ids] The profile opts in; the flag rides the
+  // resolved config to the provider client and is absent otherwise.
+  test("forwards exportSourceIds from the winning profile", async () => {
+    setLlmConfig({
+      profiles: {
+        "shim-profile": {
+          provider: "openai-compatible",
+          model: "claude-sonnet",
+          source: "user",
+          exportSourceIds: true,
+        },
+        "plain-profile": {
+          provider: "openai-compatible",
+          model: "router-auto",
+          source: "user",
+        },
+      },
+    });
+
+    let seen: SendMessageOptions | undefined;
+    const wrapped = new RetryProvider(
+      makeProvider("openai-compatible", (options) => {
+        seen = options;
+      }),
+    );
+
+    await wrapped.sendMessage(DUMMY_MESSAGES, {
+      config: { callSite: "memoryRetrieval", overrideProfile: "shim-profile" },
+    });
+    expect((seen?.config as Record<string, unknown>).exportSourceIds).toBe(
+      true,
+    );
+
+    await wrapped.sendMessage(DUMMY_MESSAGES, {
+      config: { callSite: "memoryRetrieval", overrideProfile: "plain-profile" },
+    });
+    expect(
+      (seen?.config as Record<string, unknown>).exportSourceIds,
+    ).toBeUndefined();
+  });
+
   test("attaches sanitized stable attribution headers only when enabled", async () => {
     setLlmConfig({
       profiles: {

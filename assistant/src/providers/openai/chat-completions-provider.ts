@@ -227,12 +227,7 @@ const log = getLogger("chat-completions");
  *  `"max"`, but Fireworks accepts it for DeepSeek V4; the assignment to
  *  `params.reasoning_effort` casts through this union. */
 export type ReasoningEffortWire =
-  | "none"
-  | "low"
-  | "medium"
-  | "high"
-  | "xhigh"
-  | "max";
+  "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
 const REASONING_EFFORT_RANK: Record<ReasoningEffortWire, number> = {
   none: 0,
@@ -859,9 +854,7 @@ export class OpenAIChatCompletionsProvider implements Provider {
   private requestHeaders: Record<string, string>;
   private parseThinkTags: boolean;
   private assistantReasoningField:
-    | "reasoning"
-    | "reasoning_content"
-    | undefined;
+    "reasoning" | "reasoning_content" | undefined;
   private coerceObjectArgsToJsonString: boolean;
   private salvageXmlToolCalls: boolean;
   private omitToolChoiceWhenReasoning: boolean;
@@ -915,15 +908,12 @@ export class OpenAIChatCompletionsProvider implements Provider {
     const modelOverride = configObj?.model as string | undefined;
     const effort = configObj?.effort as string | undefined;
     const logitBias = configObj?.logit_bias as
-      | Record<string, number>
-      | undefined;
+      Record<string, number> | undefined;
     const topP = configObj?.top_p as number | undefined;
     const usageAttributionHeaders = configObj?.usageAttributionHeaders as
-      | Record<string, string>
-      | undefined;
+      Record<string, string> | undefined;
     const perRequestHeaders = configObj?.requestHeaders as
-      | Record<string, string>
-      | undefined;
+      Record<string, string> | undefined;
 
     // Per-tool keys whose object schemas were rewritten to JSON strings for the
     // wire, to be decoded back on the response. Empty unless
@@ -973,9 +963,13 @@ export class OpenAIChatCompletionsProvider implements Provider {
       }
 
       // [local patch: shim source ids] Non-standard `_vellum` body field for
-      // openai-compatible shims (flag set only there by `RetryProvider`).
+      // local openai-compatible shims. The profile opts in (`exportSourceIds`);
+      // a real upstream API never gets it even if a profile sets the flag.
       // Omitted entirely when nothing is tagged so the body stays unchanged.
-      if (configObj?.exportSourceIds === true) {
+      if (
+        configObj?.exportSourceIds === true &&
+        this.name === "openai-compatible"
+      ) {
         const ext = buildVellumWireExtension(wireSourceIds);
         if (ext) {
           (params as unknown as Record<string, unknown>)._vellum = ext;

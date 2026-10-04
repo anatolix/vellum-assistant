@@ -1526,7 +1526,7 @@ describe("local shim effort transport", () => {
           "high",
           "xhigh",
           "max",
-        ]) {
+        ] as const) {
           await wrapped.sendMessage(DUMMY_MESSAGES, {
             config: {
               model,

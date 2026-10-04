@@ -1397,6 +1397,12 @@ export async function runAssistantDrivenCompaction(
       signal: args.signal,
       config: {
         callSite: COMPACTION_CALL_SITE,
+        // [local patch: codex-shim] operation intent independent of mainAgent routing.
+        requestHeaders: { "X-Shim-Operation": "compact" },
+        // [local patch: codex-shim] session affinity for shim providers: prompt_cache_key /
+        // X-Conversation-Id must name the same conversation as the main turns.
+        selectionSeed: args.conversationId,
+        conversationId: args.conversationId,
         usageTracking: "manual",
         tool_choice: { type: "none" },
         ...(args.overrideProfile
@@ -1867,6 +1873,12 @@ export async function runEmergencyCompaction(
       signal: args.signal,
       config: {
         callSite: COMPACTION_CALL_SITE,
+        // [local patch: codex-shim] operation intent independent of mainAgent routing.
+        requestHeaders: { "X-Shim-Operation": "compact" },
+        // [local patch: codex-shim] session affinity for shim providers: prompt_cache_key /
+        // X-Conversation-Id must name the same conversation as the main turns.
+        selectionSeed: args.conversationId,
+        conversationId: args.conversationId,
         usageTracking: "manual",
         tool_choice: { type: "none" },
         ...(args.overrideProfile

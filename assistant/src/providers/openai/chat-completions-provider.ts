@@ -24,6 +24,7 @@ import {
 import { supportsForcedToolChoiceWithThinking } from "../model-catalog.js";
 import { PLACEHOLDER_EMPTY_TURN } from "../placeholder-sentinels.js";
 import { recordProviderRequestDiagnostics } from "../request-diagnostics.js";
+import { buildVellumWireExtension, collectSourceIds } from "../source-ids.js";
 import { createStreamTimeout } from "../stream-timeout.js";
 import { createToolProgressEmitter } from "../tool-progress-events.js";
 import type {
@@ -933,11 +934,15 @@ export class OpenAIChatCompletionsProvider implements Provider {
     try {
       const thoughtSignaturesByCallId =
         geminiThoughtSignaturesByToolCallId(messages);
+      // [local patch: shim source ids] per-wire-message persisted row ids,
+      // parallel to `openaiMessages`. Only serialized when `exportSourceIds`.
+      const wireSourceIds: string[][] = [];
       const openaiMessages = await this.toOpenAIMessages(
         messages,
         systemPrompt,
         requestSupportsInlineAudio(modelOverride ?? this.model),
         modelOverride ?? this.model,
+        wireSourceIds,
       );
 
       recordProviderRequestDiagnostics({
@@ -965,6 +970,16 @@ export class OpenAIChatCompletionsProvider implements Provider {
       const promptCacheKey = configObj?.promptCacheKey;
       if (typeof promptCacheKey === "string" && promptCacheKey.length > 0) {
         params.prompt_cache_key = promptCacheKey;
+      }
+
+      // [local patch: shim source ids] Non-standard `_vellum` body field for
+      // openai-compatible shims (flag set only there by `RetryProvider`).
+      // Omitted entirely when nothing is tagged so the body stays unchanged.
+      if (configObj?.exportSourceIds === true) {
+        const ext = buildVellumWireExtension(wireSourceIds);
+        if (ext) {
+          (params as unknown as Record<string, unknown>)._vellum = ext;
+        }
       }
 
       // Profile-scoped token biasing (e.g. the `suppress-cjk` preset). Resolved
@@ -1725,17 +1740,33 @@ export class OpenAIChatCompletionsProvider implements Provider {
     systemPrompt?: string,
     audioInputEnabled = false,
     model = this.model,
+    sourceIdsOut?: string[][],
   ): Promise<OpenAI.Chat.Completions.ChatCompletionMessageParam[]> {
     // Swap any persisted attachment references back to inline base64 before
     // serializing, so the block transforms below can read `source.data`.
     messages = await resolveMediaReferences(messages);
     const result: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [];
+    // [local patch: shim source ids] `sourceIdsOut[i]` = persisted row ids
+    // behind `result[i]`. Kept parallel by routing every push through here.
+    const push = (
+      wire: OpenAI.Chat.Completions.ChatCompletionMessageParam,
+      sourceIds: string[],
+    ): void => {
+      result.push(wire);
+      sourceIdsOut?.push(sourceIds);
+    };
 
     if (systemPrompt) {
-      result.push({
-        role: "system",
-        content: systemPrompt.replaceAll(SYSTEM_PROMPT_CACHE_BOUNDARY, "\n\n"),
-      });
+      push(
+        {
+          role: "system",
+          content: systemPrompt.replaceAll(
+            SYSTEM_PROMPT_CACHE_BOUNDARY,
+            "\n\n",
+          ),
+        },
+        [],
+      );
     }
 
     // Tool-call ids emitted in assistant messages earlier in this request.
@@ -1750,7 +1781,7 @@ export class OpenAIChatCompletionsProvider implements Provider {
         for (const toolCall of assistantMessage.tool_calls ?? []) {
           emittedToolCallIds.add(toolCall.id);
         }
-        result.push(assistantMessage);
+        push(assistantMessage, collectSourceIds(msg.content));
       } else {
         // User messages may contain tool_result blocks mixed with text/image
         const toolResults = msg.content.filter(
@@ -1795,11 +1826,14 @@ export class OpenAIChatCompletionsProvider implements Provider {
             orphanedResultBlocks.push(serialized.block);
             continue;
           }
-          result.push({
-            role: "tool",
-            tool_call_id: tr.tool_use_id,
-            content: protectJsonSchemaToolResult(serialized.payload),
-          });
+          push(
+            {
+              role: "tool",
+              tool_call_id: tr.tool_use_id,
+              content: protectJsonSchemaToolResult(serialized.payload),
+            },
+            collectSourceIds([tr]),
+          );
         }
 
         // Emit remaining content, degraded orphaned results, and any tool
@@ -1813,7 +1847,10 @@ export class OpenAIChatCompletionsProvider implements Provider {
           ...toolResultMedia,
         ];
         if (userContent.length > 0) {
-          result.push(this.toOpenAIUserMessage(userContent, audioInputEnabled));
+          push(
+            this.toOpenAIUserMessage(userContent, audioInputEnabled),
+            collectSourceIds(userContent),
+          );
         }
       }
     }

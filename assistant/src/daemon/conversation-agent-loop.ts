@@ -78,6 +78,7 @@ import {
   ConnectionResolutionError,
   resolveRoutingIdentity,
 } from "../providers/routing-identity.js";
+import { tagBlocksSource } from "../providers/source-ids.js";
 import type { ContentBlock, Message } from "../providers/types.js";
 import type { Provider } from "../providers/types.js";
 import { resolveCapabilities } from "../runtime/capabilities.js";
@@ -1595,6 +1596,17 @@ export async function runAgentLoopImpl(
     // immediately before the call, after every hook (memory injection, title,
     // user plugins) has settled its shape. Runs unconditionally — a malformed
     // history is a hard provider rejection, never a per-conversation opt-in.
+    // [local patch: shim source ids] the turn's own user message was built in
+    // memory, not loaded from the DB, so its blocks carry no row tag yet. Tag
+    // them (after hooks, so injected blocks ride along) with the persisted row
+    // id; already-tagged blocks are left alone.
+    for (let i = finalUserPromptCtx.latestMessages.length - 1; i >= 0; i--) {
+      const candidate = finalUserPromptCtx.latestMessages[i];
+      if (candidate?.role === "user") {
+        tagBlocksSource(candidate.content, userMessageId);
+        break;
+      }
+    }
     const repairedMessages = repairHistoryForRun(
       finalUserPromptCtx.latestMessages,
       ctx.conversationId,

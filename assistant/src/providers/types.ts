@@ -404,6 +404,14 @@ export interface SendMessageConfig {
    */
   promptCacheKey?: string;
   /**
+   * [local patch: shim source ids] When true, the Chat Completions client
+   * attaches a non-standard `_vellum` body field mapping wire messages to the
+   * persisted row ids their blocks came from (see `providers/source-ids.ts`).
+   * Set by `RetryProvider` for `openai-compatible` only; never a wire field
+   * itself.
+   */
+  exportSourceIds?: boolean;
+  /**
    * Internal per-request HTTP headers for managed-proxy usage attribution.
    * Provider clients may pass these through SDK request options only when the
    * transport is Vellum-managed, and must never include this object in provider

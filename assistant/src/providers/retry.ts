@@ -705,6 +705,10 @@ function normalizeSendMessageOptions(
   // [local patch: codex-shim] openai-compatible shims learn the call-site (compactionAgent →
   // compact the shim's own session instead of running a normal turn) and the conversation id.
   if (providerName === "openai-compatible") {
+    // [local patch: shim source ids] shims get persisted row ids per wire
+    // message (`_vellum` body field) so they can match history by id, not
+    // only by text hash.
+    nextConfig.exportSourceIds = true;
     const extra: Record<string, string> = {};
     if (typeof config.callSite === "string" && config.callSite.length > 0) {
       extra["X-Call-Site"] = config.callSite;

@@ -100,6 +100,7 @@ import {
   buildSystemPrompt,
   type SystemPromptPersonaOverride,
 } from "../prompts/system-prompt.js";
+import { tagBlocksSource } from "../providers/source-ids.js";
 import type { ContentBlock, Message } from "../providers/types.js";
 import type { Provider, ToolDefinition } from "../providers/types.js";
 import { type TrustClass } from "../runtime/actor-trust-resolver.js";
@@ -1823,6 +1824,8 @@ export class Conversation {
         }
       }
 
+      // [local patch: shim source ids] remember which row each block came from.
+      tagBlocksSource(content, m.id);
       return { role, content };
     });
 

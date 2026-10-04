@@ -1,0 +1,118 @@
+import { describe, expect, test } from "bun:test";
+
+import { tagBlocksSource } from "../../source-ids.js";
+import type { Message, SendMessageOptions } from "../../types.js";
+import { OpenAIChatCompletionsProvider } from "../chat-completions-provider.js";
+
+type CreateParams = Record<string, unknown> & {
+  messages: { role: string }[];
+  _vellum?: {
+    version: number;
+    messages: { index: number; source_ids: string[] }[];
+  };
+};
+
+function captureProvider(): {
+  provider: OpenAIChatCompletionsProvider;
+  seen: () => CreateParams | undefined;
+} {
+  const provider = new OpenAIChatCompletionsProvider(
+    "test-key",
+    "qwen/qwen3-8b",
+  );
+  let seenParams: CreateParams | undefined;
+  (
+    provider as unknown as {
+      client: {
+        chat: {
+          completions: {
+            create: (params: CreateParams) => Promise<AsyncIterable<unknown>>;
+          };
+        };
+      };
+    }
+  ).client.chat.completions.create = async (params) => {
+    seenParams = params;
+    return {
+      async *[Symbol.asyncIterator]() {
+        yield {
+          choices: [{ delta: {}, finish_reason: "stop" }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        };
+      },
+    };
+  };
+  return { provider, seen: () => seenParams };
+}
+
+/** user(u1) → assistant text+tool_use(a1) → user tool_result+text(u2). */
+function taggedHistory(): Message[] {
+  const m1: Message = {
+    role: "user",
+    content: [{ type: "text", text: "hi" }],
+  };
+  const m2: Message = {
+    role: "assistant",
+    content: [
+      { type: "text", text: "looking" },
+      { type: "tool_use", id: "call_1", name: "lookup", input: { q: "x" } },
+    ],
+  };
+  const m3: Message = {
+    role: "user",
+    content: [
+      { type: "tool_result", tool_use_id: "call_1", content: "found" },
+      { type: "text", text: "and then?" },
+    ],
+  };
+  tagBlocksSource(m1.content, "u1");
+  tagBlocksSource(m2.content, "a1");
+  tagBlocksSource(m3.content, "u2");
+  return [m1, m2, m3];
+}
+
+describe("chat-completions _vellum source ids", () => {
+  test("indexes source ids against the fanned-out wire messages", async () => {
+    const { provider, seen } = captureProvider();
+    const options: SendMessageOptions = {
+      systemPrompt: "sys",
+      config: { exportSourceIds: true },
+    };
+    await provider.sendMessage(taggedHistory(), options);
+
+    const params = seen();
+    expect(params?.messages.map((m) => m.role)).toEqual([
+      "system",
+      "user",
+      "assistant",
+      "tool",
+      "user",
+    ]);
+    expect(params?._vellum).toEqual({
+      version: 1,
+      messages: [
+        { index: 1, source_ids: ["u1"] },
+        { index: 2, source_ids: ["a1"] },
+        { index: 3, source_ids: ["u2"] },
+        { index: 4, source_ids: ["u2"] },
+      ],
+    });
+  });
+
+  test("omits _vellum when exportSourceIds is not set", async () => {
+    const { provider, seen } = captureProvider();
+    await provider.sendMessage(taggedHistory(), { systemPrompt: "sys" });
+    expect(seen()).toBeDefined();
+    expect(seen()?._vellum).toBeUndefined();
+  });
+
+  test("omits _vellum when nothing is tagged", async () => {
+    const { provider, seen } = captureProvider();
+    await provider.sendMessage(
+      [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      { config: { exportSourceIds: true } },
+    );
+    expect(seen()).toBeDefined();
+    expect(seen()?._vellum).toBeUndefined();
+  });
+});

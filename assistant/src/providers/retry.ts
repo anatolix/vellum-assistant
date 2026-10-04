@@ -702,6 +702,28 @@ function normalizeSendMessageOptions(
     }
   }
 
+  // [local patch: codex-shim] openai-compatible shims learn the call-site (compactionAgent →
+  // compact the shim's own session instead of running a normal turn) and the conversation id.
+  if (providerName === "openai-compatible") {
+    const extra: Record<string, string> = {};
+    if (typeof config.callSite === "string" && config.callSite.length > 0) {
+      extra["X-Call-Site"] = config.callSite;
+    }
+    if (
+      typeof config.conversationId === "string" &&
+      config.conversationId.length > 0
+    ) {
+      extra["X-Conversation-Id"] = config.conversationId;
+    }
+    if (Object.keys(extra).length > 0) {
+      nextConfig.requestHeaders = {
+        ...((nextConfig.requestHeaders as Record<string, string> | undefined) ??
+          {}),
+        ...extra,
+      };
+    }
+  }
+
   // `overrideProfile`, `forceOverrideProfile`, `selectionSeed`,
   // `conversationId`, and `nativeWebSearchSentinel` are routing/resolution-time
   // concerns (consumed by the resolver below, `CallSiteRoutingProvider`'s

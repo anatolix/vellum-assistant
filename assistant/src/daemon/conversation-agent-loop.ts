@@ -78,7 +78,12 @@ import {
   ConnectionResolutionError,
   resolveRoutingIdentity,
 } from "../providers/routing-identity.js";
-import { blockSourceId, tagBlocksSource } from "../providers/source-ids.js";
+import {
+  blockSourceId,
+  messageSourceId,
+  tagBlocksSource,
+  tagMessageSource,
+} from "../providers/source-ids.js";
 import type { ContentBlock, Message } from "../providers/types.js";
 import type { Provider } from "../providers/types.js";
 import { resolveCapabilities } from "../runtime/capabilities.js";
@@ -1984,7 +1989,9 @@ export async function runAgentLoopImpl(
       if (sourceId) {
         tagBlocksSource(cleanedBlocks, sourceId);
       }
-      return { ...msg, content: cleanedBlocks };
+      const cleaned = { ...msg, content: cleanedBlocks };
+      tagMessageSource(cleaned, messageSourceId(msg));
+      return cleaned;
     });
 
     // "The run delivered a final assistant reply", not "the run produced any

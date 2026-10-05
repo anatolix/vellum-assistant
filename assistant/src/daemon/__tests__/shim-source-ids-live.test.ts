@@ -7,7 +7,9 @@ import {
   carrySourceTags,
   carrySourceTagsByContent,
   collectSourceIds,
+  messageSourceId,
   tagBlocksSource,
+  tagMessageSource,
 } from "../../providers/source-ids.js";
 import type { ContentBlock, Message } from "../../providers/types.js";
 import {
@@ -75,6 +77,16 @@ describe("source id tag carrier", () => {
     expect(collectSourceIds(copy[2]!.content)).toEqual(["t1", "u2"]);
   });
 
+  test("carrySourceTags carries the message-level tag of an empty turn", () => {
+    const empty: Message = { role: "assistant", content: [] };
+    tagMessageSource(empty, "a-empty");
+    const copy: Message[] = [{ role: "assistant", content: [] }];
+    carrySourceTags([empty], copy);
+    expect(messageSourceId(copy[0]!)).toBe("a-empty");
+    expect(JSON.stringify(copy[0])).toBe('{"role":"assistant","content":[]}');
+    expect(copy[0]).toEqual({ role: "assistant", content: [] });
+  });
+
   test("carrySourceTags refuses misaligned arrays", () => {
     const a: Message = { role: "user", content: [{ type: "text", text: "q" }] };
     tagBlocksSource(a.content, "u1");
@@ -110,6 +122,34 @@ describe("tagToolResultSources", () => {
     // non-tool blocks untouched
     expect(blockSourceId(history[0]!.content[0]!)).toBeUndefined();
     expect(blockSourceId(history[1]!.content[0]!)).toBeUndefined();
+  });
+
+  test("hook guidance appended to the results message takes their row; a merged prompt keeps its own", async () => {
+    const state = createEventHandlerState();
+    state.toolResultRowByToolUseId.set("call_1", "tr-row-1");
+    const prompt: ContentBlock = { type: "text", text: "and now this" };
+    tagBlocksSource([prompt], "u-prompt");
+    const history: Message[] = [
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "call_1", name: "x", input: {} }],
+      },
+      {
+        role: "user",
+        content: [
+          toolResult("call_1", "boom"),
+          {
+            type: "text",
+            text: "<system_notice>This tool call returned an error.</system_notice>",
+          },
+          prompt,
+        ],
+      },
+    ];
+    await tagToolResultSources(state, [history]);
+    expect(blockSourceId(history[1]!.content[0]!)).toBe("tr-row-1");
+    expect(blockSourceId(history[1]!.content[1]!)).toBe("tr-row-1");
+    expect(blockSourceId(history[1]!.content[2]!)).toBe("u-prompt");
   });
 
   test("waits for an in-flight batch reservation", async () => {

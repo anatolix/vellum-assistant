@@ -24,7 +24,13 @@ import {
 import { supportsForcedToolChoiceWithThinking } from "../model-catalog.js";
 import { PLACEHOLDER_EMPTY_TURN } from "../placeholder-sentinels.js";
 import { recordProviderRequestDiagnostics } from "../request-diagnostics.js";
-import { buildVellumWireExtension, collectSourceIds } from "../source-ids.js";
+import {
+  buildVellumWireExtension,
+  collectSourceIds,
+  messageSourceIds,
+  partSourceIds,
+  SOURCE_PART_TAIL,
+} from "../source-ids.js";
 import { createStreamTimeout } from "../stream-timeout.js";
 import { createToolProgressEmitter } from "../tool-progress-events.js";
 import type {
@@ -227,7 +233,12 @@ const log = getLogger("chat-completions");
  *  `"max"`, but Fireworks accepts it for DeepSeek V4; the assignment to
  *  `params.reasoning_effort` casts through this union. */
 export type ReasoningEffortWire =
-  "none" | "low" | "medium" | "high" | "xhigh" | "max";
+  | "none"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
 
 const REASONING_EFFORT_RANK: Record<ReasoningEffortWire, number> = {
   none: 0,
@@ -854,7 +865,9 @@ export class OpenAIChatCompletionsProvider implements Provider {
   private requestHeaders: Record<string, string>;
   private parseThinkTags: boolean;
   private assistantReasoningField:
-    "reasoning" | "reasoning_content" | undefined;
+    | "reasoning"
+    | "reasoning_content"
+    | undefined;
   private coerceObjectArgsToJsonString: boolean;
   private salvageXmlToolCalls: boolean;
   private omitToolChoiceWhenReasoning: boolean;
@@ -908,12 +921,15 @@ export class OpenAIChatCompletionsProvider implements Provider {
     const modelOverride = configObj?.model as string | undefined;
     const effort = configObj?.effort as string | undefined;
     const logitBias = configObj?.logit_bias as
-      Record<string, number> | undefined;
+      | Record<string, number>
+      | undefined;
     const topP = configObj?.top_p as number | undefined;
     const usageAttributionHeaders = configObj?.usageAttributionHeaders as
-      Record<string, string> | undefined;
+      | Record<string, string>
+      | undefined;
     const perRequestHeaders = configObj?.requestHeaders as
-      Record<string, string> | undefined;
+      | Record<string, string>
+      | undefined;
 
     // Per-tool keys whose object schemas were rewritten to JSON strings for the
     // wire, to be decoded back on the response. Empty unless
@@ -1775,7 +1791,9 @@ export class OpenAIChatCompletionsProvider implements Provider {
         for (const toolCall of assistantMessage.tool_calls ?? []) {
           emittedToolCallIds.add(toolCall.id);
         }
-        push(assistantMessage, collectSourceIds(msg.content));
+        // Message-level tag covers an empty turn (serialized as the
+        // placeholder below) whose row has no block to carry the id.
+        push(assistantMessage, messageSourceIds(msg));
       } else {
         // User messages may contain tool_result blocks mixed with text/image
         const toolResults = msg.content.filter(
@@ -1826,7 +1844,9 @@ export class OpenAIChatCompletionsProvider implements Provider {
               tool_call_id: tr.tool_use_id,
               content: protectJsonSchemaToolResult(serialized.payload),
             },
-            collectSourceIds([tr]),
+            // `row/tool_use_id`: each result of a batch row is its own wire
+            // message; the part keeps their ids distinct.
+            partSourceIds(collectSourceIds([tr]), tr.tool_use_id),
           );
         }
 
@@ -1841,9 +1861,17 @@ export class OpenAIChatCompletionsProvider implements Provider {
           ...toolResultMedia,
         ];
         if (userContent.length > 0) {
+          // The rest of a tool-result row (hook guidance, media, degraded
+          // orphans) is `row/tail`; a merged user prompt keeps its own plain
+          // row id. A plain user message is untouched.
+          const resultRows = new Set(collectSourceIds(toolResults));
           push(
             this.toOpenAIUserMessage(userContent, audioInputEnabled),
-            collectSourceIds(userContent),
+            collectSourceIds(userContent).map((id) =>
+              resultRows.has(id)
+                ? partSourceIds([id], SOURCE_PART_TAIL)[0]!
+                : id,
+            ),
           );
         }
       }

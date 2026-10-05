@@ -74,7 +74,12 @@ import { backfillMemoryRecallLogMessageId } from "../plugins/defaults/memory/mem
 import { backfillMemoryV2ActivationMessageId } from "../plugins/defaults/memory/v2/activation-log-store.js";
 import { backfillMemoryV3SelectionMessageId } from "../plugins/defaults/memory/v3/shadow-plugin.js";
 import { resolveMediaSourceData } from "../providers/media-resolve.js";
-import { carrySourceTags, tagBlocksSource } from "../providers/source-ids.js";
+import {
+  carrySourceTags,
+  tagBlocksSource,
+  tagMessageSource,
+  tagToolResultTail,
+} from "../providers/source-ids.js";
 import type {
   ContentBlock,
   ImageContent,
@@ -1665,6 +1670,9 @@ export async function tagToolResultSources(
           tagBlocksSource([block], rowId);
         }
       }
+      // Hook guidance appended to this message (tool-error notice) has no
+      // row of its own: it belongs to the results it was appended after.
+      tagToolResultTail(message);
     }
   }
   // The send array is a rebuilt copy of the live history: carry every tag
@@ -3372,6 +3380,8 @@ export async function handleMessageComplete(
   // loop pushed into its live history, so tagging its blocks here carries the
   // assistant row id into every later provider call of this conversation.
   tagBlocksSource(event.message.content as ContentBlock[], assistantMessageId);
+  // An empty turn has no block to tag; the message object carries the row.
+  tagMessageSource(event.message, assistantMessageId);
   const contentJson = JSON.stringify(contentForPersistence);
   // Stamp the served model carried on the event (`response.model`, the same
   // value `llm_usage` records) onto the row alongside the content, so turn-trace

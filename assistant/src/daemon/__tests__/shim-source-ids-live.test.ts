@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 import {
   blockSourceId,
   carrySourceTags,
+  carrySourceTagsByContent,
   collectSourceIds,
   tagBlocksSource,
 } from "../../providers/source-ids.js";
@@ -144,5 +145,46 @@ describe("tagToolResultSources", () => {
     const block = toolResult("call_3");
     await tagToolResultSources(state, [[{ role: "user", content: [block] }]]);
     expect(blockSourceId(block)).toBeUndefined();
+  });
+});
+
+describe("carrySourceTagsByContent", () => {
+  const text = (t: string): ContentBlock => ({ type: "text", text: t });
+  test("restores tags on a compacted (reshaped) history by block content", () => {
+    const u1 = text("old question");
+    const u2 = text("Исправляй");
+    const ctx = text("<turn_context>t</turn_context>");
+    tagBlocksSource([u1], "row-u1");
+    tagBlocksSource([ctx, u2], "row-u2");
+    const from: Message[] = [
+      { role: "user", content: [u1] },
+      { role: "assistant", content: [text("answer")] },
+      { role: "user", content: [ctx, u2] },
+    ];
+    const kept = text("Исправляй");
+    const reinjected = text("<turn_context>t2</turn_context>");
+    const to: Message[] = [
+      { role: "assistant", content: [text("<context_summary>…")] },
+      { role: "user", content: [reinjected, kept] },
+    ];
+    carrySourceTagsByContent(from, to);
+    expect(blockSourceId(kept)).toBe("row-u2");
+    expect(blockSourceId(reinjected)).toBeUndefined();
+    expect(blockSourceId(to[0]!.content[0]!)).toBeUndefined();
+  });
+  test("ambiguous content shared by two rows is left untagged", () => {
+    const a = text("Повтор");
+    const b = text("Повтор");
+    tagBlocksSource([a], "row-a");
+    tagBlocksSource([b], "row-b");
+    const copy = text("Повтор");
+    carrySourceTagsByContent(
+      [
+        { role: "user", content: [a] },
+        { role: "user", content: [b] },
+      ],
+      [{ role: "user", content: [copy] }],
+    );
+    expect(blockSourceId(copy)).toBeUndefined();
   });
 });

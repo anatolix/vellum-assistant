@@ -78,7 +78,7 @@ import {
   ConnectionResolutionError,
   resolveRoutingIdentity,
 } from "../providers/routing-identity.js";
-import { tagBlocksSource } from "../providers/source-ids.js";
+import { blockSourceId, tagBlocksSource } from "../providers/source-ids.js";
 import type { ContentBlock, Message } from "../providers/types.js";
 import type { Provider } from "../providers/types.js";
 import { resolveCapabilities } from "../runtime/capabilities.js";
@@ -118,6 +118,7 @@ import {
   resetInjectionLedgersForStrip,
   selectFinalComputerUseScreenshotCandidate,
   settlePendingPartialFlush,
+  tagToolResultSources,
 } from "./conversation-agent-loop-handlers.js";
 import {
   approveHostAttachmentRead,
@@ -1600,12 +1601,24 @@ export async function runAgentLoopImpl(
     // memory, not loaded from the DB, so its blocks carry no row tag yet. Tag
     // them (after hooks, so injected blocks ride along) with the persisted row
     // id; already-tagged blocks are left alone.
+    // Only the newest user message that actually carries prompt content is
+    // the turn's own row: a tool_result tail belongs to a tool-result row and
+    // must never inherit the user id.
     for (let i = finalUserPromptCtx.latestMessages.length - 1; i >= 0; i--) {
       const candidate = finalUserPromptCtx.latestMessages[i];
-      if (candidate?.role === "user") {
-        tagBlocksSource(candidate.content, userMessageId);
+      if (candidate?.role !== "user") {
+        continue;
+      }
+      const promptBlocks = candidate.content.filter(
+        // guard:allow-tool-result-only: user-role messages never carry
+        // provider web_search_tool_result blocks (those ride on assistant).
+        (block) => block.type !== "tool_result",
+      );
+      if (promptBlocks.length === 0) {
         break;
       }
+      tagBlocksSource(promptBlocks, userMessageId);
+      break;
     }
     const repairedMessages = repairHistoryForRun(
       finalUserPromptCtx.latestMessages,
@@ -1963,6 +1976,14 @@ export async function runAgentLoopImpl(
       }
       const { cleanedContent } = cleanAssistantContent(msg.content);
       const cleanedBlocks = cleanedContent as ContentBlock[];
+      // [local patch: shim source ids] cleaning may rebuild blocks; carry the
+      // assistant row tag over so the next turn still exports it.
+      const sourceId = msg.content
+        .map((block) => blockSourceId(block))
+        .find((id) => id !== undefined);
+      if (sourceId) {
+        tagBlocksSource(cleanedBlocks, sourceId);
+      }
       return { ...msg, content: cleanedBlocks };
     });
 
@@ -2158,6 +2179,10 @@ export async function runAgentLoopImpl(
     // below. It only rewrites the in-memory history the NEXT turn is built
     // from, never the just-delivered reply, so it must not sit on the critical
     // path to the terminal SSE that re-enables the composer.
+    // [local patch: shim source ids] a turn that ends on tool results (yield,
+    // abort) never starts another call, so tag that tail here before it
+    // becomes the next turn's in-memory history.
+    await tagToolResultSources(state, [restoredHistory]);
     ctx.messages = restoredHistory;
 
     // The row's override is whichever profile served the last call.

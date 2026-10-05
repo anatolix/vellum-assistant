@@ -336,7 +336,16 @@ export type AgentEvent =
    * every `message_complete` for the same call; multi-call agent turns emit
    * one pair per call.
    */
-  | { type: "llm_call_started"; callSite?: LLMCallSite }
+  | {
+      type: "llm_call_started";
+      callSite?: LLMCallSite;
+      /**
+       * [local patch: shim source ids] the live history and the exact array
+       * about to be sent, so the daemon can tag freshly persisted tool-result
+       * rows onto their blocks before serialization.
+       */
+      sourceTagTargets?: ReadonlyArray<ReadonlyArray<Message>>;
+    }
   | { type: "text_delta"; text: string }
   | { type: "thinking_delta"; thinking: string }
   /**
@@ -2332,7 +2341,17 @@ export class AgentLoop {
         // `assistant_turn_start` wire event reaches the client BEFORE the
         // provider starts streaming deltas — the deltas downstream will
         // carry the freshly-reserved id.
-        await onEvent({ type: "llm_call_started", callSite });
+        const callStartedEvent: AgentEvent = {
+          type: "llm_call_started",
+          callSite,
+        };
+        // [local patch: shim source ids] non-enumerable so the history never
+        // shows up in event logs, wire fan-out or event-shape comparisons.
+        Object.defineProperty(callStartedEvent, "sourceTagTargets", {
+          value: [history, sanitizedHistory],
+          enumerable: false,
+        });
+        await onEvent(callStartedEvent);
 
         // Inner try/catch narrows error-recording scope to the provider
         // call itself. The outer agent-loop catch (below) wraps the entire

@@ -107,10 +107,18 @@ function cloneHookValue<T>(value: T, seen = new WeakMap<object, unknown>()): T {
   const copy: Record<PropertyKey, unknown> = {};
   seen.set(value, copy);
   for (const key of Reflect.ownKeys(value)) {
-    copy[key] = cloneHookValue(
+    const cloned = cloneHookValue(
       (value as Record<PropertyKey, unknown>)[key],
       seen,
     );
+    // [local patch: shim source ids] keep non-enumerable side-channel props
+    // (the block source-id tag) non-enumerable on the copy.
+    const desc = Object.getOwnPropertyDescriptor(value, key);
+    if (desc && !desc.enumerable && "value" in desc) {
+      Object.defineProperty(copy, key, { ...desc, value: cloned });
+    } else {
+      copy[key] = cloned;
+    }
   }
   return copy as T;
 }

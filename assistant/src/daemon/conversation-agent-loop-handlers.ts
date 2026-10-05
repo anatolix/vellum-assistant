@@ -74,6 +74,7 @@ import { backfillMemoryRecallLogMessageId } from "../plugins/defaults/memory/mem
 import { backfillMemoryV2ActivationMessageId } from "../plugins/defaults/memory/v2/activation-log-store.js";
 import { backfillMemoryV3SelectionMessageId } from "../plugins/defaults/memory/v3/shadow-plugin.js";
 import { resolveMediaSourceData } from "../providers/media-resolve.js";
+import { carrySourceTags, tagBlocksSource } from "../providers/source-ids.js";
 import type {
   ContentBlock,
   ImageContent,
@@ -332,6 +333,12 @@ export interface EventHandlerState {
   lastAssistantMessageId: string | undefined;
   /** Assistant rows that must join the turn's final disk-view export. */
   readonly assistantMessageIdsToSync: Set<string>;
+  /**
+   * [local patch: shim source ids] tool_use_id → persisted grouped
+   * tool-result row id, so the live history's tool_result blocks can be
+   * tagged with their real row before the next provider call.
+   */
+  readonly toolResultRowByToolUseId: Map<string, string>;
   /**
    * Visibility marker stamped on {@link lastAssistantMessageId}, when the turn
    * routed its reply through `send_user_message`. The turn's terminal
@@ -726,6 +733,7 @@ export function createEventHandlerState(): EventHandlerState {
     persistProviderErrorAsAssistantMessage: false,
     lastAssistantMessageId: undefined,
     assistantMessageIdsToSync: new Set(),
+    toolResultRowByToolUseId: new Map(),
     assistantRowAwaitingFinalization: false,
     inflightWriters: new Map(),
     pendingToolResults: new Map(),
@@ -1613,6 +1621,63 @@ function buildAssistantChannelMetadata(
 }
 
 /**
+ * [local patch: shim source ids] Tag the tool_result blocks of the arrays
+ * the loop is about to send (live history and its sanitized copy) with the
+ * grouped tool-result row each one was persisted to. Blocks that already
+ * carry a tag (loaded from the DB) are left alone by `tagBlocksSource`.
+ */
+export async function tagToolResultSources(
+  state: EventHandlerState,
+  targets: ReadonlyArray<ReadonlyArray<Message>> | undefined,
+): Promise<void> {
+  if (!targets) {
+    return;
+  }
+  // tool_result events are dispatched without awaiting, so the batch row may
+  // still be reserving when the next call starts. Wait for it (never throw:
+  // a failed reservation only means these blocks fall back to hashing).
+  if (state.pendingToolResultRowReservation !== undefined) {
+    try {
+      const rowId = await state.pendingToolResultRowReservation;
+      for (const toolUseId of state.pendingToolResults.keys()) {
+        state.toolResultRowByToolUseId.set(toolUseId, rowId);
+      }
+    } catch {
+      // fall through with whatever is already mapped
+    }
+  }
+  for (const messages of state.toolResultRowByToolUseId.size > 0
+    ? targets
+    : []) {
+    for (const message of messages) {
+      if (message.role !== "user") {
+        continue;
+      }
+      for (const block of message.content) {
+        // guard:allow-tool-result-only: only locally-executed tool results
+        // get grouped tool-result rows; provider web-search results ride on
+        // the assistant row and are tagged with it.
+        if (block.type !== "tool_result") {
+          continue;
+        }
+        const rowId = state.toolResultRowByToolUseId.get(block.tool_use_id);
+        if (rowId) {
+          tagBlocksSource([block], rowId);
+        }
+      }
+    }
+  }
+  // The send array is a rebuilt copy of the live history: carry every tag
+  // (user/assistant from load or completion, tool from above) onto it.
+  const [live, ...copies] = targets;
+  if (live) {
+    for (const copy of copies) {
+      carrySourceTags(live, copy);
+    }
+  }
+}
+
+/**
  * Reserve an empty assistant row for the LLM call about to begin, stash
  * its id on `state.lastAssistantMessageId`, and announce the boundary on
  * the wire via `assistant_turn_start`.
@@ -2239,6 +2304,9 @@ async function persistPendingToolResultRow(
     deps.ctx.conversationId,
     buildToolResultMetadata(deps),
   );
+  for (const toolUseId of state.pendingToolResults.keys()) {
+    state.toolResultRowByToolUseId.set(toolUseId, rowId);
+  }
   bestEffortModeSessionTracking("tool result persistence", () => {
     const row = getMessageById(rowId, deps.ctx.conversationId);
     if (row) {
@@ -2299,6 +2367,9 @@ export async function finalizePendingToolResultRow(
     conversationId,
     metadata,
   );
+  for (const toolUseId of state.pendingToolResults.keys()) {
+    state.toolResultRowByToolUseId.set(toolUseId, rowId);
+  }
   // `getConversation` returns `ConversationRow | null`, so `!= null` gates on a
   // real row (skipping media referencing / disk sync when the conversation was
   // not found rather than asking those helpers to resolve a missing id).
@@ -3297,6 +3368,10 @@ export async function handleMessageComplete(
       "handleMessageComplete fired without a prior llm_call_started reserving an assistant row",
     );
   }
+  // [local patch: shim source ids] `event.message` is the same object the
+  // loop pushed into its live history, so tagging its blocks here carries the
+  // assistant row id into every later provider call of this conversation.
+  tagBlocksSource(event.message.content as ContentBlock[], assistantMessageId);
   const contentJson = JSON.stringify(contentForPersistence);
   // Stamp the served model carried on the event (`response.model`, the same
   // value `llm_usage` records) onto the row alongside the content, so turn-trace
@@ -3625,6 +3700,7 @@ export async function dispatchAgentEvent(
   try {
     switch (event.type) {
       case "llm_call_started":
+        await tagToolResultSources(state, event.sourceTagTargets);
         await handleLlmCallStarted(state, deps);
         break;
       case "text_delta":

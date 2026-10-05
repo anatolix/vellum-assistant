@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { tagBlocksSource } from "../../source-ids.js";
+import { tagBlocksSource, tagMessageSource } from "../../source-ids.js";
 import type { Message, SendMessageOptions } from "../../types.js";
 import { OpenAIChatCompletionsProvider } from "../chat-completions-provider.js";
 
@@ -90,14 +90,51 @@ describe("chat-completions _vellum source ids", () => {
       "user",
     ]);
     expect(params?._vellum).toEqual({
-      version: 1,
+      version: 2,
       messages: [
         { index: 1, source_ids: ["u1"] },
         { index: 2, source_ids: ["a1"] },
-        { index: 3, source_ids: ["u2"] },
-        { index: 4, source_ids: ["u2"] },
+        { index: 3, source_ids: ["u2/call_1"] },
+        { index: 4, source_ids: ["u2/tail"] },
       ],
     });
+  });
+
+  test("an empty assistant turn exports its message-level row id; a merged prompt in the tail keeps a plain id", async () => {
+    const { provider, seen } = captureProvider();
+    const [m1, m2, m3] = taggedHistory();
+    const prompt = { type: "text" as const, text: "also" };
+    tagBlocksSource([prompt], "u3");
+    m3!.content.push(prompt);
+    const empty: Message = { role: "assistant", content: [] };
+    tagMessageSource(empty, "a2");
+    const m5: Message = {
+      role: "user",
+      content: [{ type: "text", text: "?" }],
+    };
+    tagBlocksSource(m5.content, "u4");
+    await provider.sendMessage([m1!, m2!, m3!, empty, m5], {
+      systemPrompt: "sys",
+      config: { exportSourceIds: true },
+    });
+    const params = seen();
+    expect(params?.messages.map((m) => m.role)).toEqual([
+      "system",
+      "user",
+      "assistant",
+      "tool",
+      "user",
+      "assistant",
+      "user",
+    ]);
+    expect(params?._vellum?.messages).toEqual([
+      { index: 1, source_ids: ["u1"] },
+      { index: 2, source_ids: ["a1"] },
+      { index: 3, source_ids: ["u2/call_1"] },
+      { index: 4, source_ids: ["u2/tail", "u3"] },
+      { index: 5, source_ids: ["a2"] },
+      { index: 6, source_ids: ["u4"] },
+    ]);
   });
 
   test("omits _vellum on a real upstream even when the profile sets the flag", async () => {

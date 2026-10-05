@@ -73,6 +73,95 @@ export function collectSourceIds(blocks: readonly ContentBlock[]): string[] {
   return out;
 }
 
+// Message-level fallback tag. A persisted row whose content is empty (an
+// assistant turn that produced no blocks: user input landed mid-turn, a
+// reasoning-only stop) has no block to carry the tag, so the id rides on the
+// message object itself. Same non-enumerable Symbol discipline as blocks; it
+// does not survive `{ ...message }` either, so rebuild seams carry it over.
+const MESSAGE_SOURCE = Symbol.for("vellum.messageSourceId");
+
+export function tagMessageSource(
+  message: Message | undefined,
+  sourceId: string | undefined,
+): void {
+  if (
+    !message ||
+    !sourceId ||
+    !Object.isExtensible(message) ||
+    taggedBlock(message as unknown as ContentBlock)[MESSAGE_SOURCE] !==
+      undefined
+  ) {
+    return;
+  }
+  Object.defineProperty(message, MESSAGE_SOURCE, {
+    value: sourceId,
+    enumerable: false,
+    writable: false,
+    configurable: true,
+  });
+}
+
+export function messageSourceId(message: Message): string | undefined {
+  const id = taggedBlock(message as unknown as ContentBlock)[MESSAGE_SOURCE];
+  return typeof id === "string" ? id : undefined;
+}
+
+/** Block ids of `message`; the message-level tag only when the blocks yield none. */
+export function messageSourceIds(message: Message): string[] {
+  const ids = collectSourceIds(message.content);
+  if (ids.length > 0) {
+    return ids;
+  }
+  const own = messageSourceId(message);
+  return own === undefined ? [] : [own];
+}
+
+/**
+ * `row/part` ids: one persisted row can render as several wire messages (each
+ * tool result of a batch row becomes its own `tool` message; the row's
+ * remaining blocks — hook guidance such as the tool-error notice, media, a
+ * merged prompt — become a trailing `user` message). The part makes every wire
+ * message's id unique by construction so a shim never needs content hashing
+ * to tell them apart: the tool_use_id for a tool message, `tail` for the rest.
+ */
+export const SOURCE_PART_TAIL = "tail";
+
+export function partSourceIds(ids: readonly string[], part: string): string[] {
+  return ids.map((id) => `${id}/${part}`);
+}
+
+/**
+ * Give the non-tool_result blocks of a tool-result message the row of its
+ * results. The agent loop appends post-tool-use hook guidance (the tool-error
+ * `<system_notice>`) to the same user message as the results it concerns; it
+ * is never persisted on its own, so the results' row is the only honest owner.
+ * Blocks that already carry a tag (a merged user prompt) are left alone. When
+ * the results span several rows (history repair merged two batch rows), the
+ * guidance follows the last result, which is the one it was appended after.
+ */
+export function tagToolResultTail(message: Message): void {
+  if (message.role !== "user") {
+    return;
+  }
+  let rowId: string | undefined;
+  let hasTail = false;
+  for (const block of message.content) {
+    if (block.type === "tool_result") {
+      rowId = blockSourceId(block) ?? rowId;
+    } else if (blockSourceId(block) === undefined) {
+      hasTail = true;
+    }
+  }
+  if (rowId === undefined || !hasTail) {
+    return;
+  }
+  for (const block of message.content) {
+    if (block.type !== "tool_result") {
+      tagBlocksSource([block], rowId);
+    }
+  }
+}
+
 /**
  * Carry tags from `from` onto a rebuilt copy `to` (e.g. the pre-send
  * sanitized history). Only when both arrays line up message-for-message by
@@ -89,7 +178,11 @@ export function carrySourceTags(
   for (let i = 0; i < to.length; i++) {
     const src = from[i]!;
     const dst = to[i]!;
-    if (src.role !== dst.role || src.content === dst.content) {
+    if (src.role !== dst.role) {
+      continue;
+    }
+    tagMessageSource(dst, messageSourceId(src));
+    if (src.content === dst.content) {
       continue;
     }
     const ids = collectSourceIds(src.content);
@@ -150,7 +243,9 @@ export function carrySourceTagsByContent(
   }
 }
 
-export const VELLUM_WIRE_EXTENSION_VERSION = 1 as const;
+// v2: ids may be composite `row/part` (see `partSourceIds`); a wire message
+// derived from an empty row carries the row's message-level tag.
+export const VELLUM_WIRE_EXTENSION_VERSION = 2 as const;
 
 export interface VellumWireExtension {
   version: typeof VELLUM_WIRE_EXTENSION_VERSION;

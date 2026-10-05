@@ -39,6 +39,7 @@ import type { ContextWindowResult } from "../plugins/defaults/compaction/window-
 import { runHook } from "../plugins/pipeline.js";
 import type { CompactionCircuitEvent } from "../plugins/types.js";
 import { hasVisibleText } from "../providers/content-blocks.js";
+import { carrySourceTagsByContent } from "../providers/source-ids.js";
 import { isMaxTokensStopReason } from "../providers/stop-reasons.js";
 import { normalizeThinkingConfigForWire } from "../providers/thinking-config.js";
 import type {
@@ -1874,6 +1875,7 @@ export class AgentLoop {
                   overflowSignal ?? undefined,
                 );
                 if (attempt.history) {
+                  const preCompaction = history;
                   // Trim before anything else reads the rebuilt array: the
                   // provider call further down this same iteration sends it, so
                   // content compaction reintroduced has to be brought back
@@ -1882,6 +1884,9 @@ export class AgentLoop {
                     attempt.history,
                     rlog,
                   );
+                  // [local patch: shim source ids] the kept tail is rebuilt,
+                  // dropping the row tags; restore them by block content.
+                  carrySourceTagsByContent(preCompaction, history);
                   // The compacted, re-injected array is the new base; output
                   // produced after this point is what the wrapper persists.
                   newMessagesStart = history.length;

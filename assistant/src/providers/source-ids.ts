@@ -109,6 +109,47 @@ export function carrySourceTags(
   }
 }
 
+/**
+ * Carry tags across a rebuild that reshapes the array (in-place compaction:
+ * the head becomes a summary, the kept tail is re-created). Matches blocks by
+ * exact content; a content shared by blocks of different rows is ambiguous
+ * and left untagged rather than guessed.
+ */
+export function carrySourceTagsByContent(
+  from: readonly Message[],
+  to: readonly Message[],
+): void {
+  if (from === to) {
+    return;
+  }
+  const byKey = new Map<string, string | null>();
+  for (const m of from) {
+    for (const block of m.content) {
+      const id = blockSourceId(block);
+      if (id === undefined) {
+        continue;
+      }
+      const key = `${m.role}\u0000${JSON.stringify(block)}`;
+      const prev = byKey.get(key);
+      byKey.set(key, prev === undefined || prev === id ? id : null);
+    }
+  }
+  if (byKey.size === 0) {
+    return;
+  }
+  for (const m of to) {
+    for (const block of m.content) {
+      if (blockSourceId(block) !== undefined) {
+        continue;
+      }
+      const id = byKey.get(`${m.role}\u0000${JSON.stringify(block)}`);
+      if (id) {
+        tagBlocksSource([block], id);
+      }
+    }
+  }
+}
+
 export const VELLUM_WIRE_EXTENSION_VERSION = 1 as const;
 
 export interface VellumWireExtension {

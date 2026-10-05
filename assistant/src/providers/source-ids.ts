@@ -3,20 +3,28 @@
  *
  * Side-channel correlation between in-memory content blocks and the persisted
  * conversation row they came from. `Message` is `{ role, content }` only and
- * stays that way; the row id rides in a WeakMap keyed by the block object.
- * History repair merges messages by spreading block arrays (block references
- * survive), so the tag follows a block through merges, slices and re-pushes
- * without touching `Message` or the repair code. Blocks that get rebuilt
- * (tool-result stubs, media swaps) simply lose the tag — consumers must treat
- * the id as best-effort and fall back to content.
+ * stays that way; the row id rides on a non-enumerable Symbol property of
+ * each block, invisible to JSON, deep equality and provider wire fields. It
+ * survives anything that keeps block identity (history repair merges, message
+ * re-wrapping); seams that rebuild blocks carry it over explicitly
+ * (`carrySourceTags`, assistant cleanup, tool-result re-tagging).
  *
  * Exported to openai-compatible shims only, as a non-standard `_vellum` field
  * on the Chat Completions body (see `OpenAIChatCompletionsProvider`), so a
  * shim can tell "same message, rewritten rendering" from "new message".
  */
-import type { ContentBlock } from "./types.js";
+import type { ContentBlock, Message } from "./types.js";
 
-const blockSource = new WeakMap<object, string>();
+// A non-enumerable Symbol property on the block itself. It does NOT survive
+// object spread, so every seam that rebuilds blocks must carry the tag over
+// explicitly (assistant cleanup does; tool results are re-tagged before each
+// provider call). Kept non-enumerable so Bun/Node deep equality, JSON and
+// Object.keys never see it.
+const BLOCK_SOURCE = Symbol.for("vellum.sourceId");
+
+function taggedBlock(block: ContentBlock): Record<symbol, unknown> {
+  return block as unknown as Record<symbol, unknown>;
+}
 
 /** Tag every block that has no tag yet. Never overwrites an existing tag. */
 export function tagBlocksSource(
@@ -30,17 +38,27 @@ export function tagBlocksSource(
     if (
       block !== null &&
       typeof block === "object" &&
-      !blockSource.has(block)
+      Object.isExtensible(block) &&
+      taggedBlock(block)[BLOCK_SOURCE] === undefined
     ) {
-      blockSource.set(block, sourceId);
+      // Non-enumerable: invisible to JSON, Object.keys and deep-equality, so
+      // persisted rows, wire bodies and structural comparisons are unchanged.
+      Object.defineProperty(block, BLOCK_SOURCE, {
+        value: sourceId,
+        enumerable: false,
+        writable: false,
+        configurable: true,
+      });
     }
   }
 }
 
 export function blockSourceId(block: ContentBlock): string | undefined {
-  return block !== null && typeof block === "object"
-    ? blockSource.get(block)
-    : undefined;
+  if (block === null || typeof block !== "object") {
+    return undefined;
+  }
+  const sourceId = taggedBlock(block)[BLOCK_SOURCE];
+  return typeof sourceId === "string" ? sourceId : undefined;
 }
 
 /** Distinct source ids of `blocks`, in first-seen order. */
@@ -53,6 +71,42 @@ export function collectSourceIds(blocks: readonly ContentBlock[]): string[] {
     }
   }
   return out;
+}
+
+/**
+ * Carry tags from `from` onto a rebuilt copy `to` (e.g. the pre-send
+ * sanitized history). Only when both arrays line up message-for-message by
+ * role; an untagged block takes the tag of the same-index, same-type block of
+ * its original message, or the original's sole id when it has exactly one.
+ */
+export function carrySourceTags(
+  from: readonly Message[],
+  to: readonly Message[],
+): void {
+  if (from === to || from.length !== to.length) {
+    return;
+  }
+  for (let i = 0; i < to.length; i++) {
+    const src = from[i]!;
+    const dst = to[i]!;
+    if (src.role !== dst.role || src.content === dst.content) {
+      continue;
+    }
+    const ids = collectSourceIds(src.content);
+    if (ids.length === 0) {
+      continue;
+    }
+    dst.content.forEach((block, j) => {
+      if (blockSourceId(block) !== undefined) {
+        return;
+      }
+      const twin = src.content[j];
+      const twinId =
+        twin && twin.type === block.type ? blockSourceId(twin) : undefined;
+      const id = twinId ?? (ids.length === 1 ? ids[0] : undefined);
+      tagBlocksSource([block], id);
+    });
+  }
 }
 
 export const VELLUM_WIRE_EXTENSION_VERSION = 1 as const;

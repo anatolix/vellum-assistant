@@ -346,6 +346,12 @@ export type AgentEvent =
        * rows onto their blocks before serialization.
        */
       sourceTagTargets?: ReadonlyArray<ReadonlyArray<Message>>;
+      /**
+       * [local patch: shim source ids] written back by the daemon's handler:
+       * the id of the assistant row it reserved for this call, so the loop
+       * can hand it to the provider (`config.replyMessageId`).
+       */
+      replyMessageId?: string;
     }
   | { type: "text_delta"; text: string }
   | { type: "thinking_delta"; thinking: string }
@@ -2346,7 +2352,10 @@ export class AgentLoop {
         // `assistant_turn_start` wire event reaches the client BEFORE the
         // provider starts streaming deltas — the deltas downstream will
         // carry the freshly-reserved id.
-        const callStartedEvent: AgentEvent = {
+        const callStartedEvent: Extract<
+          AgentEvent,
+          { type: "llm_call_started" }
+        > = {
           type: "llm_call_started",
           callSite,
         };
@@ -2357,6 +2366,11 @@ export class AgentLoop {
           enumerable: false,
         });
         await onEvent(callStartedEvent);
+        // [local patch: shim source ids] the reserved reply row, if the daemon
+        // handler stamped one, rides on the per-call config to the provider.
+        if (callStartedEvent.replyMessageId) {
+          providerConfig.replyMessageId = callStartedEvent.replyMessageId;
+        }
 
         // Inner try/catch narrows error-recording scope to the provider
         // call itself. The outer agent-loop catch (below) wraps the entire

@@ -76,6 +76,8 @@ import { backfillMemoryV3SelectionMessageId } from "../plugins/defaults/memory/v
 import { resolveMediaSourceData } from "../providers/media-resolve.js";
 import {
   carrySourceTags,
+  carrySourceTagsByContent,
+  messageSourceIds,
   tagBlocksSource,
   tagMessageSource,
   tagToolResultTail,
@@ -1634,6 +1636,7 @@ function buildAssistantChannelMetadata(
 export async function tagToolResultSources(
   state: EventHandlerState,
   targets: ReadonlyArray<ReadonlyArray<Message>> | undefined,
+  reference?: ReadonlyArray<Message>,
 ): Promise<void> {
   if (!targets) {
     return;
@@ -1683,6 +1686,63 @@ export async function tagToolResultSources(
       carrySourceTags(live, copy);
     }
   }
+  // Last line of defence: the run history is derived from the conversation's
+  // canonical history (tagged at load / persist) through hooks and repair
+  // passes, any of which may rebuild a message or its blocks and drop the
+  // non-enumerable tag. Re-attach from the canonical history — by position
+  // when the arrays still line up, else by exact block content — and log
+  // what had to be rescued so the rebuilding seam can be found and fixed.
+  if (reference) {
+    for (const messages of targets) {
+      const before = untaggedWireMessages(messages);
+      if (before.length === 0) {
+        continue;
+      }
+      carrySourceTags(reference, messages);
+      carrySourceTagsByContent(reference, messages);
+      const after = untaggedWireMessages(messages);
+      log.info(
+        {
+          rescued: before.length - after.length,
+          rescuedMessages: before
+            .filter((m) => !after.includes(m))
+            .map(describeUntagged),
+          stillUntagged: after.map(describeUntagged),
+        },
+        "[source ids] run history carried untagged messages; re-tagged from the conversation history",
+      );
+    }
+  }
+}
+
+function untaggedWireMessages(
+  messages: ReadonlyArray<Message>,
+): { index: number; message: Message }[] {
+  const out: { index: number; message: Message }[] = [];
+  messages.forEach((message, index) => {
+    if (messageSourceIds(message).length === 0) {
+      out.push({ index, message });
+    }
+  });
+  return out;
+}
+
+function describeUntagged({
+  index,
+  message,
+}: {
+  index: number;
+  message: Message;
+}): { index: number; role: string; blocks: number; head: string } {
+  const text = message.content
+    .map((block) => (block.type === "text" ? block.text : `<${block.type}>`))
+    .join(" ");
+  return {
+    index,
+    role: message.role,
+    blocks: message.content.length,
+    head: text.replace(/\s+/g, " ").trim().slice(0, 80),
+  };
 }
 
 /**
@@ -3710,8 +3770,17 @@ export async function dispatchAgentEvent(
   try {
     switch (event.type) {
       case "llm_call_started":
-        await tagToolResultSources(state, event.sourceTagTargets);
+        await tagToolResultSources(
+          state,
+          event.sourceTagTargets,
+          deps.ctx.messages,
+        );
         await handleLlmCallStarted(state, deps);
+        // [local patch: shim source ids] hand the reserved reply row back to
+        // the loop so the provider can export it as `_vellum.reply_id`.
+        if (state.lastAssistantMessageId) {
+          event.replyMessageId = state.lastAssistantMessageId;
+        }
         break;
       case "text_delta":
         // Reveal-guard barrier: if a `credentials reveal` tool_use just

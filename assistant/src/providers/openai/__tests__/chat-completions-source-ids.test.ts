@@ -8,6 +8,7 @@ type CreateParams = Record<string, unknown> & {
   messages: { role: string }[];
   _vellum?: {
     version: number;
+    reply_id?: string;
     messages: { index: number; source_ids: string[] }[];
   };
 };
@@ -90,7 +91,7 @@ describe("chat-completions _vellum source ids", () => {
       "user",
     ]);
     expect(params?._vellum).toEqual({
-      version: 2,
+      version: 3,
       messages: [
         { index: 1, source_ids: ["u1"] },
         { index: 2, source_ids: ["a1"] },
@@ -135,6 +136,32 @@ describe("chat-completions _vellum source ids", () => {
       { index: 5, source_ids: ["a2"] },
       { index: 6, source_ids: ["u4"] },
     ]);
+  });
+
+  test("exports the reserved reply row as reply_id (v3)", async () => {
+    const { provider, seen } = captureProvider();
+    await provider.sendMessage(taggedHistory(), {
+      systemPrompt: "sys",
+      config: { exportSourceIds: true, replyMessageId: "a9" },
+    });
+    expect(seen()?._vellum?.version).toBe(3);
+    expect(seen()?._vellum?.reply_id).toBe("a9");
+  });
+
+  test("reply_id alone still yields a _vellum body (nothing else tagged)", async () => {
+    const { provider, seen } = captureProvider();
+    await provider.sendMessage(
+      [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      {
+        systemPrompt: "sys",
+        config: { exportSourceIds: true, replyMessageId: "a1" },
+      },
+    );
+    expect(seen()?._vellum).toEqual({
+      version: 3,
+      reply_id: "a1",
+      messages: [],
+    });
   });
 
   test("omits _vellum on a real upstream even when the profile sets the flag", async () => {

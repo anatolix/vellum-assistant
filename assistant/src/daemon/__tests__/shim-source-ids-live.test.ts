@@ -152,6 +152,42 @@ describe("tagToolResultSources", () => {
     expect(blockSourceId(history[1]!.content[2]!)).toBe("u-prompt");
   });
 
+  test("re-tags a rebuilt run history from the canonical conversation history", async () => {
+    const state = createEventHandlerState();
+    const canonical: Message[] = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "<turn_context>t</turn_context>" },
+          { type: "text", text: "Рестарт" },
+        ],
+      },
+      { role: "assistant", content: [] },
+      { role: "user", content: [{ type: "text", text: "Ну как там?" }] },
+    ];
+    tagBlocksSource(canonical[0]!.content, "u-restart");
+    tagMessageSource(canonical[1]!, "a-empty");
+    tagBlocksSource(canonical[2]!.content, "u-now");
+    // A hook rebuilt every block and message object (same content, no tags).
+    const rebuilt = canonical.map((m) => ({
+      role: m.role,
+      content: m.content.map((b) => ({ ...b })),
+    })) as Message[];
+    expect(collectSourceIds(rebuilt[0]!.content)).toEqual([]);
+    await tagToolResultSources(state, [rebuilt], canonical);
+    expect(collectSourceIds(rebuilt[0]!.content)).toEqual(["u-restart"]);
+    expect(messageSourceId(rebuilt[1]!)).toBe("a-empty");
+    expect(collectSourceIds(rebuilt[2]!.content)).toEqual(["u-now"]);
+    // Misaligned copy (a message dropped): still recovered by content.
+    const shorter = [rebuilt[0], rebuilt[2]].map((m) => ({
+      role: m!.role,
+      content: m!.content.map((b) => ({ ...b })),
+    })) as Message[];
+    await tagToolResultSources(state, [shorter], canonical);
+    expect(collectSourceIds(shorter[0]!.content)).toEqual(["u-restart"]);
+    expect(collectSourceIds(shorter[1]!.content)).toEqual(["u-now"]);
+  });
+
   test("waits for an in-flight batch reservation", async () => {
     const state = createEventHandlerState();
     (state.pendingToolResults as Map<string, unknown>).set("call_9", {});

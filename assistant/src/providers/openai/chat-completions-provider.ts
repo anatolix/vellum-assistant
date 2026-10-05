@@ -986,7 +986,13 @@ export class OpenAIChatCompletionsProvider implements Provider {
         configObj?.exportSourceIds === true &&
         this.name === "openai-compatible"
       ) {
-        const ext = buildVellumWireExtension(wireSourceIds);
+        const ext = buildVellumWireExtension(
+          wireSourceIds,
+          typeof configObj.replyMessageId === "string" &&
+            configObj.replyMessageId.length > 0
+            ? configObj.replyMessageId
+            : undefined,
+        );
         if (ext) {
           (params as unknown as Record<string, unknown>)._vellum = ext;
         }

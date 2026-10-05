@@ -57,7 +57,7 @@ describe("source-ids side-channel", () => {
     expect(buildVellumWireExtension([[], []])).toBeUndefined();
     expect(buildVellumWireExtension([])).toBeUndefined();
     expect(buildVellumWireExtension([[], ["r1"], [], ["r2", "r3"]])).toEqual({
-      version: 2,
+      version: 3,
       messages: [
         { index: 1, source_ids: ["r1"] },
         { index: 3, source_ids: ["r2", "r3"] },

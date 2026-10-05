@@ -412,6 +412,13 @@ export interface SendMessageConfig {
    */
   exportSourceIds?: boolean;
   /**
+   * [local patch: shim source ids] Persisted id of the assistant row the
+   * daemon reserved for this call's reply (`handleLlmCallStarted`), exported
+   * as `_vellum.reply_id` alongside `exportSourceIds`. Never a wire field
+   * itself.
+   */
+  replyMessageId?: string;
+  /**
    * Internal per-request HTTP headers for managed-proxy usage attribution.
    * Provider clients may pass these through SDK request options only when the
    * transport is Vellum-managed, and must never include this object in provider

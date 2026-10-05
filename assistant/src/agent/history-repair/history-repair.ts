@@ -17,6 +17,10 @@
 
 import { isEffectivelyEmptyContent } from "../../providers/content-blocks.js";
 import { analyzeServerToolPairing } from "../../providers/server-tool-pairing.js";
+import {
+  messageSourceId,
+  tagMessageSource,
+} from "../../providers/source-ids.js";
 import type {
   ContentBlock,
   Message,
@@ -55,6 +59,14 @@ const SYNTHETIC_WEB_SEARCH_ERROR = {
   type: "web_search_tool_result_error",
   error_code: "unavailable",
 };
+
+// [local patch: shim source ids] a rebuilt message keeps the row tag of the
+// message it was rebuilt from (block tags ride on the blocks themselves; the
+// message-level tag is what an empty row has instead).
+function withMessageSource(rebuilt: Message, from: Message): Message {
+  tagMessageSource(rebuilt, messageSourceId(from));
+  return rebuilt;
+}
 
 export function repairHistory(messages: Message[]): RepairResult {
   const stats: RepairStats = {
@@ -174,7 +186,9 @@ export function repairHistory(messages: Message[]): RepairResult {
         repairedContent = cleanedContent;
       }
 
-      result.push({ role: "assistant", content: repairedContent });
+      result.push(
+        withMessageSource({ role: "assistant", content: repairedContent }, msg),
+      );
       resultSourceIndex.push(msgIndex);
 
       // Only track client-side tool_use IDs as pending (not server_tool_use)
@@ -238,7 +252,9 @@ export function repairHistory(messages: Message[]): RepairResult {
           }
         }
 
-        result.push({ role: "user", content: newContent });
+        result.push(
+          withMessageSource({ role: "user", content: newContent }, msg),
+        );
         resultSourceIndex.push(msgIndex);
         pendingToolUseIds = new Set();
         recoveredResults = new Map();
@@ -262,7 +278,9 @@ export function repairHistory(messages: Message[]): RepairResult {
           return block;
         });
 
-        result.push({ role: "user", content: newContent });
+        result.push(
+          withMessageSource({ role: "user", content: newContent }, msg),
+        );
         resultSourceIndex.push(msgIndex);
       }
     }
@@ -288,7 +306,9 @@ export function repairHistory(messages: Message[]): RepairResult {
       prev.content = [...prev.content, ...msg.content];
       stats.consecutiveSameRoleMerged++;
     } else {
-      merged.push({ role: msg.role, content: [...msg.content] });
+      merged.push(
+        withMessageSource({ role: msg.role, content: [...msg.content] }, msg),
+      );
     }
     const sourceIndex = resultSourceIndex[resultIndex];
     if (sourceIndex >= 0) {
@@ -472,7 +492,9 @@ export function deepRepairHistory(
     if (prev && prev.role === msg.role) {
       prev.content = [...prev.content, ...msg.content];
     } else {
-      merged.push({ role: msg.role, content: [...msg.content] });
+      merged.push(
+        withMessageSource({ role: msg.role, content: [...msg.content] }, msg),
+      );
     }
   }
 

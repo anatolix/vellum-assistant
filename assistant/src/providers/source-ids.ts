@@ -245,10 +245,19 @@ export function carrySourceTagsByContent(
 
 // v2: ids may be composite `row/part` (see `partSourceIds`); a wire message
 // derived from an empty row carries the row's message-level tag.
-export const VELLUM_WIRE_EXTENSION_VERSION = 2 as const;
+export const VELLUM_WIRE_EXTENSION_VERSION = 3 as const;
 
 export interface VellumWireExtension {
   version: typeof VELLUM_WIRE_EXTENSION_VERSION;
+  /**
+   * v3: the persisted row id reserved for the reply this request produces
+   * (the daemon reserves the assistant row before the provider call). A shim
+   * can key everything it generates — the reply text as `reply_id`, each
+   * tool call as `reply_id/<tool_call_id>` — without waiting for the next
+   * request to echo the row back. Absent when no row was reserved
+   * (sub-agent / utility calls).
+   */
+  reply_id?: string;
   /** Entries only for wire messages that carry at least one source id. */
   messages: { index: number; source_ids: string[] }[];
 }
@@ -260,6 +269,7 @@ export interface VellumWireExtension {
  */
 export function buildVellumWireExtension(
   perMessage: readonly (readonly string[])[],
+  replyId?: string,
 ): VellumWireExtension | undefined {
   const messages: VellumWireExtension["messages"] = [];
   perMessage.forEach((ids, index) => {
@@ -267,7 +277,15 @@ export function buildVellumWireExtension(
       messages.push({ index, source_ids: [...ids] });
     }
   });
-  return messages.length > 0
-    ? { version: VELLUM_WIRE_EXTENSION_VERSION, messages }
-    : undefined;
+  if (messages.length === 0 && !replyId) {
+    return undefined;
+  }
+  const ext: VellumWireExtension = {
+    version: VELLUM_WIRE_EXTENSION_VERSION,
+    messages,
+  };
+  if (replyId) {
+    ext.reply_id = replyId;
+  }
+  return ext;
 }

@@ -285,8 +285,9 @@ describe("OpenAIResponsesProvider orphan tool_result guard", () => {
       expect(firstUser.type).toBe("message");
       expect(firstUser.role).toBe("user");
       const texts = firstUser.content.map((part) => part.text ?? "");
-      expect(texts).toContain("continue from here");
-      expect(texts).toContain("[orphaned tool result] stranded output");
+      expect(texts.join("\n\n")).toBe(
+        "continue from here\n\n[orphaned tool result] stranded output",
+      );
     });
   }
 
@@ -362,8 +363,9 @@ describe("OpenAIChatCompletionsProvider orphan tool_result guard", () => {
       const texts = Array.isArray(content)
         ? content.map((part) => (part.text as string) ?? "")
         : [content];
-      expect(texts).toContain("continue from here");
-      expect(texts).toContain("[orphaned tool result] stranded output");
+      expect(texts.join("\n\n")).toBe(
+        "continue from here\n\n[orphaned tool result] stranded output",
+      );
     });
   }
 
@@ -450,8 +452,7 @@ describe("orphan degradation agrees across both OpenAI transports", () => {
     return (
       stub
         .messages()
-        // A user message carrying a single text part serializes as a plain
-        // string on this transport rather than a one-element array.
+        // Text-only user blocks are joined at the wire boundary.
         .flatMap((message) =>
           Array.isArray(message.content)
             ? (message.content as unknown[]).map(
@@ -459,7 +460,11 @@ describe("orphan degradation agrees across both OpenAI transports", () => {
               )
             : [String(message.content ?? "")],
         )
-        .filter((text) => text.startsWith("[orphaned"))
+        .map((text) => {
+          const index = text.indexOf("[orphaned");
+          return index < 0 ? "" : text.slice(index);
+        })
+        .filter(Boolean)
     );
   }
 

@@ -1982,9 +1982,15 @@ export class OpenAIChatCompletionsProvider implements Provider {
     blocks: ContentBlock[],
     audioInputEnabled = false,
   ): OpenAI.Chat.Completions.ChatCompletionUserMessageParam {
-    // If only a single text block, use plain string (simpler, fewer tokens)
-    if (blocks.length === 1 && blocks[0].type === "text") {
-      return { role: "user", content: clampProviderString(blocks[0].text) };
+    // Join text only at the wire boundary. The neutral blocks retain their
+    // identity and source tags (including multiple persisted row owners).
+    // This also supports string-only OpenAI-compatible endpoints without a
+    // plugin destructively flattening provider-bound conversation history.
+    if (blocks.length > 0 && blocks.every((block) => block.type === "text")) {
+      const text = blocks
+        .map((block) => (block.type === "text" ? block.text : ""))
+        .join("\n\n");
+      return { role: "user", content: clampProviderString(text) };
     }
 
     const parts: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [];

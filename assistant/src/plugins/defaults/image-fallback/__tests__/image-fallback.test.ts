@@ -108,10 +108,10 @@ const postToolUse = (await import("../hooks/post-tool-use.js")).default;
 const postCompact = (await import("../hooks/post-compact.js")).default;
 const conversationDeleted = (await import("../hooks/conversation-deleted.js"))
   .default;
-const { CAPTION_TIMEOUT_MS, findVisionProfile } = await import(
-  "../src/vision-caption.js"
-);
-const { flattenTextOnlyBlocks } = await import("../src/caption-blocks.js");
+const { CAPTION_TIMEOUT_MS, findVisionProfile } =
+  await import("../src/vision-caption.js");
+const { captionImagesInMessages, captionOutboundImagesInMessages } =
+  await import("../src/caption-blocks.js");
 const { closeCaptionStore, initCaptionStore, resetCaptionCacheForTests } =
   await import("../src/caption-cache.js");
 
@@ -323,8 +323,8 @@ describe("image-fallback user-prompt-submit hook", () => {
 
   test("preserves the user's own text around the caption it substitutes", async () => {
     /**
-     * Tests that surrounding prose survives the substitution, merged with the
-     * caption in submitted order.
+     * Tests that surrounding prose survives the substitution with its original
+     * block identity and submitted order.
      */
 
     // GIVEN a submitted message that wraps an image in the user's own prose
@@ -343,13 +343,15 @@ describe("image-fallback user-prompt-submit hook", () => {
     // WHEN the turn starts
     await userPromptSubmit(ctx);
 
-    // THEN the caption replaces the image between the two prose blocks, and
-    // the now text-only content is merged into the single block providers
-    // serialize as a plain string
-    expect(ctx.latestMessages[0].content).toHaveLength(1);
-    expect((ctx.latestMessages[0].content[0] as { text: string }).text).toBe(
-      "Look at this:\n\n[Image auto-described for text-only model: A red chart showing Q3 revenue.]\n\nWhat do you see?",
-    );
+    // THEN only the image is replaced; prose boundaries remain intact.
+    expect(ctx.latestMessages[0].content).toEqual([
+      { type: "text", text: "Look at this:" },
+      {
+        type: "text",
+        text: "[Image auto-described for text-only model: A red chart showing Q3 revenue.]",
+      },
+      { type: "text", text: "What do you see?" },
+    ]);
   });
 
   test("uses fail-open placeholder when no vision profile is configured", async () => {
@@ -603,13 +605,14 @@ describe("image-fallback user-prompt-submit hook", () => {
     expect(
       (ctx.latestMessages[0].content[0] as { text: string }).text,
     ).toContain("[Image auto-described");
-    expect(ctx.latestMessages[2].content).toHaveLength(1);
+    expect(ctx.latestMessages[2].content).toHaveLength(2);
     expect(
       (ctx.latestMessages[2].content[0] as { text: string }).text,
     ).toContain("[Image auto-described");
-    expect(
-      (ctx.latestMessages[2].content[0] as { text: string }).text,
-    ).toEndWith("\n\nboth?");
+    expect(ctx.latestMessages[2].content[1]).toEqual({
+      type: "text",
+      text: "both?",
+    });
   });
 });
 
@@ -633,12 +636,14 @@ describe("image-fallback dropped-image notice", () => {
     // WHEN the turn starts
     await userPromptSubmit(ctx);
 
-    // THEN the model receives the prose and a placeholder, merged into the
-    // single text block providers serialize as a plain string
-    expect(ctx.latestMessages[0].content).toHaveLength(1);
-    expect((ctx.latestMessages[0].content[0] as { text: string }).text).toBe(
-      "look at this\n\n[Image: no vision-capable model configured to describe it]",
-    );
+    // THEN prose and placeholder stay separate until provider serialization.
+    expect(ctx.latestMessages[0].content).toEqual([
+      { type: "text", text: "look at this" },
+      {
+        type: "text",
+        text: "[Image: no vision-capable model configured to describe it]",
+      },
+    ]);
 
     // AND the transcript carries one card telling the user the image was not sent
     expect(persistedCards).toHaveLength(1);
@@ -809,82 +814,34 @@ describe("image-fallback dropped-image notice", () => {
   });
 });
 
-describe("flattenTextOnlyBlocks", () => {
-  test("leaves a single text block untouched", () => {
-    /**
-     * Tests that content already in the shape providers serialize as a string
-     * is not rebuilt.
-     */
+describe("text identity through image-fallback sweeps", () => {
+  for (const sweep of [
+    captionImagesInMessages,
+    captionOutboundImagesInMessages,
+  ]) {
+    test(`${sweep.name} preserves multi-row text blocks even without images`, async () => {
+      const { tagBlocksSource, tagMessageSource, collectSourceIds } =
+        await import("../../../../providers/source-ids.js");
+      const first = {
+        type: "text" as const,
+        text: "<turn_context>old</turn_context>",
+      };
+      const second = { type: "text" as const, text: "исчерпали" };
+      tagBlocksSource([first], "row-A");
+      tagBlocksSource([second], "row-B");
+      const blocks = [first, second];
+      const message: Message = { role: "user", content: blocks };
+      tagMessageSource(message, "row-A");
+      const original = JSON.stringify(message);
 
-    // GIVEN a user message holding one text block
-    const block = { type: "text" as const, text: "just text" };
-    const messages: Message[] = [{ role: "user", content: [block] }];
-
-    // WHEN the content is flattened
-    const flattened = flattenTextOnlyBlocks(messages);
-
-    // THEN nothing changes
-    expect(flattened).toBe(0);
-    expect(messages[0].content).toEqual([block]);
-  });
-
-  test("leaves content holding a non-text block untouched", () => {
-    /**
-     * Tests that merging never discards a block the provider must serialize on
-     * its own, e.g. an attached file.
-     */
-
-    // GIVEN a user message mixing text with a file block
-    const messages: Message[] = [
-      {
-        role: "user",
-        content: [
-          { type: "text", text: "see the attachment" },
-          {
-            type: "file",
-            source: {
-              type: "base64",
-              media_type: "application/pdf",
-              data: "pdfdata",
-            },
-          },
-        ],
-      },
-    ];
-
-    // WHEN the content is flattened
-    const flattened = flattenTextOnlyBlocks(messages);
-
-    // THEN both blocks survive
-    expect(flattened).toBe(0);
-    expect(messages[0].content).toHaveLength(2);
-    expect(messages[0].content[1].type).toBe("file");
-  });
-
-  test("leaves assistant content untouched", () => {
-    /**
-     * Tests that only user content is merged: assistant block boundaries carry
-     * provider-side meaning (streamed parts, tool calls).
-     */
-
-    // GIVEN an assistant message with two text blocks
-    const messages: Message[] = [
-      {
-        role: "assistant",
-        content: [
-          { type: "text", text: "first" },
-          { type: "text", text: "second" },
-        ],
-      },
-    ];
-
-    // WHEN the content is flattened
-    const flattened = flattenTextOnlyBlocks(messages);
-
-    // THEN the blocks stay separate
-    expect(flattened).toBe(0);
-    expect(messages[0].content).toHaveLength(2);
-  });
+      expect(await sweep([message], "c1", null, logger)).toBe(0);
+      expect(message.content).toBe(blocks);
+      expect(message.content[0]).toBe(first);
+      expect(message.content[1]).toBe(second);
+      expect(collectSourceIds(message.content)).toEqual(["row-A", "row-B"]);
+      expect(JSON.stringify(message)).toBe(original);
+    });
+  }
 });
 
 describe("findVisionProfile", () => {
@@ -1042,10 +999,16 @@ describe("image-fallback post-compact hook", () => {
     ];
     const ctx = makeCompactCtx({ history });
     await postCompact(ctx);
-    expect(ctx.history[0].content).toHaveLength(1);
-    expect((ctx.history[0].content[0] as { text: string }).text).toBe(
-      "Images retained from the compacted portion of the conversation:\n\n[Image auto-described for text-only model: A red chart showing Q3 revenue.]",
-    );
+    expect(ctx.history[0].content).toEqual([
+      {
+        type: "text",
+        text: "Images retained from the compacted portion of the conversation:",
+      },
+      {
+        type: "text",
+        text: "[Image auto-described for text-only model: A red chart showing Q3 revenue.]",
+      },
+    ]);
   });
 
   test("captions images nested in restored tool_result contentBlocks", async () => {

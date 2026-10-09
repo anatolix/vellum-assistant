@@ -5,7 +5,7 @@ import type { Message, SendMessageOptions } from "../../types.js";
 import { OpenAIChatCompletionsProvider } from "../chat-completions-provider.js";
 
 type CreateParams = Record<string, unknown> & {
-  messages: { role: string }[];
+  messages: { role: string; content?: unknown }[];
   _vellum?: {
     version: number;
     reply_id?: string;
@@ -74,6 +74,74 @@ function taggedHistory(): Message[] {
 }
 
 describe("chat-completions _vellum source ids", () => {
+  test("joins reloaded text only on the wire, preserving every source owner", async () => {
+    const { provider, seen } = captureProvider();
+    const context = {
+      type: "text" as const,
+      text: "<turn_context>old</turn_context>",
+    };
+    const prompt = { type: "text" as const, text: "исчерпали" };
+    tagBlocksSource([context], "u1");
+    tagBlocksSource([prompt], "u2");
+    const message: Message = { role: "user", content: [context, prompt] };
+    tagMessageSource(message, "u1");
+    const originalContent = message.content;
+    await provider.sendMessage([message], {
+      systemPrompt: "sys",
+      config: { exportSourceIds: true },
+    });
+    expect(seen()?.messages[1]).toEqual({
+      role: "user",
+      content: "<turn_context>old</turn_context>\n\nисчерпали",
+    });
+    expect(seen()?._vellum?.messages).toEqual([
+      { index: 1, source_ids: ["u1", "u2"] },
+    ]);
+    expect(message.content).toBe(originalContent);
+    expect(message.content[0]).toBe(context);
+    expect(message.content[1]).toBe(prompt);
+  });
+
+  test("keeps mixed text and image content as wire parts", async () => {
+    const { provider, seen } = captureProvider();
+    const message: Message = {
+      role: "user",
+      content: [
+        { type: "text", text: "before" },
+        {
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: "image/png",
+            data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+          },
+        },
+        { type: "text", text: "after" },
+      ],
+    };
+    tagBlocksSource(message.content, "u1");
+    await provider.sendMessage([message], {
+      systemPrompt: "sys",
+      config: { exportSourceIds: true },
+    });
+    expect(seen()?.messages[1]).toEqual({
+      role: "user",
+      content: [
+        { type: "text", text: "before" },
+        {
+          type: "image_url",
+          image_url: {
+            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+          },
+        },
+        { type: "text", text: "after" },
+      ],
+    });
+    expect(seen()?._vellum?.messages).toEqual([
+      { index: 1, source_ids: ["u1"] },
+    ]);
+  });
+
   test("indexes source ids against the fanned-out wire messages", async () => {
     const { provider, seen } = captureProvider();
     const options: SendMessageOptions = {

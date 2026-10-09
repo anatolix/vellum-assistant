@@ -69,7 +69,7 @@ const TINY_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
 describe("chat-template rejection flatten fallback", () => {
-  test("retries once with flattened string content when the chat template rejects a text-only content-parts array", async () => {
+  test("retries once when a derived tool marker creates a text-only wire array", async () => {
     // GIVEN an endpoint whose chat template 400s on structured message content
     const { provider, requests } = stubProviderWithErrors([
       rejection(CHAT_TEMPLATE_400),
@@ -82,6 +82,12 @@ describe("chat-template rejection flatten fallback", () => {
         content: [
           { type: "text", text: "first paragraph" },
           { type: "text", text: "second paragraph" },
+          {
+            type: "server_tool_use",
+            id: "search-1",
+            name: "web_search",
+            input: {},
+          },
         ],
       },
     ]);
@@ -98,7 +104,9 @@ describe("chat-template rejection flatten fallback", () => {
       messages: Array<{ content: unknown }>;
     };
     const flattened = second.messages[0].content;
-    expect(flattened).toBe("first paragraph\n\nsecond paragraph");
+    expect(flattened).toBe(
+      "first paragraph\n\nsecond paragraph\n\n[Web search: web_search]",
+    );
 
     // AND the retry succeeded
     const text = response.content.find((b) => b.type === "text") as
@@ -118,13 +126,21 @@ describe("chat-template rejection flatten fallback", () => {
         content: [
           { type: "text", text: "[Image: a cat]" },
           { type: "text", text: "what is this?" },
+          {
+            type: "server_tool_use",
+            id: "search-1",
+            name: "web_search",
+            input: {},
+          },
         ],
       },
     ]);
 
     expect(requests).toHaveLength(2);
     const retry = requests[1] as { messages: Array<{ content: unknown }> };
-    expect(retry.messages[0].content).toBe("[Image: a cat]\n\nwhat is this?");
+    expect(retry.messages[0].content).toBe(
+      "[Image: a cat]\n\nwhat is this?\n\n[Web search: web_search]",
+    );
   });
 
   test("does not retry when a content-parts array carries media (never silently drop an image)", async () => {
@@ -211,6 +227,12 @@ describe("chat-template rejection flatten fallback", () => {
         content: [
           { type: "text", text: "a" },
           { type: "text", text: "b" },
+          {
+            type: "server_tool_use",
+            id: "search-1",
+            name: "web_search",
+            input: {},
+          },
         ],
       },
     ]);

@@ -12,9 +12,8 @@
  * profile, and swap in a `[Image …]` text block — and the message-level deep
  * sweep ({@link captionImagesInMessages}) that reaches images nested inside
  * `tool_result` blocks as well as top-level ones. The message-level sweeps
- * close by merging text-only user content into a single text block
- * ({@link flattenTextOnlyBlocks}), the shape providers serialize as a plain
- * string.
+ * preserve text block boundaries and source identity; providers join text
+ * only when serializing their wire format.
  *
  * The substitution mutates the blocks in place, but the hook pipeline hands
  * each hook a deep clone of its context, so the caption reaches only the
@@ -174,48 +173,13 @@ async function captionToolResultMedia(
 }
 
 /**
- * Merge a user message's text blocks (in place) into a single text block,
- * joined by a blank line, for every message whose content is more than one
- * block and entirely text. Returns how many messages were merged.
- *
- * A text-only turn's user content is text after image substitution, and a
- * single text block is the shape providers serialize as a plain string:
- * OpenAI-compatible endpoints that accept only `messages[].content` as a
- * string (rejecting an array of content parts with
- * `body/messages/N/content must be string`) can then take the turn, and the
- * request costs fewer tokens than the equivalent array of parts. The blank
- * line keeps the boundaries between the blocks a user message carries (the
- * turn's runtime-injected context blocks plus the user's own text) legible.
- *
- * Content holding any non-text block (audio, tool results, an image no
- * fallback replaced) keeps its array shape, since merging would drop it.
- */
-export function flattenTextOnlyBlocks(messages: Message[]): number {
-  let flattened = 0;
-  for (const message of messages) {
-    if (message.role !== "user" || message.content.length <= 1) {
-      continue;
-    }
-    if (!message.content.every((block) => block.type === "text")) {
-      continue;
-    }
-    const text = message.content
-      .map((block) => (block.type === "text" ? block.text : ""))
-      .join("\n\n");
-    message.content = [{ type: "text", text }];
-    flattened++;
-  }
-  return flattened;
-}
-
-/**
  * Deep-sweep a message list (in place) for image blocks and replace each with
  * a text caption via {@link captionImageBlocks}. Covers both top-level image
  * blocks (user-attached images, the compactor's retained-image message) and
  * images nested in a `tool_result` block's rich `contentBlocks` (tool results
  * restored from persistence carry their raw images there).
  *
- * Text-only user content is then merged via {@link flattenTextOnlyBlocks}.
+ * Text-only user blocks keep their original identity and source tags.
  */
 export async function captionImagesInMessages(
   messages: Message[],
@@ -238,7 +202,6 @@ export async function captionImagesInMessages(
       logger,
     );
   }
-  flattenTextOnlyBlocks(messages);
   return replaced;
 }
 
@@ -251,7 +214,7 @@ export async function captionImagesInMessages(
  * with its compact removed-media marker on the retry rather than a full
  * caption: captioning it would waste vision calls and balloon context.
  *
- * Text-only user content is then merged via {@link flattenTextOnlyBlocks}.
+ * Text-only user blocks keep their original identity and source tags.
  */
 export async function captionOutboundImagesInMessages(
   messages: Message[],
@@ -277,6 +240,5 @@ export async function captionOutboundImagesInMessages(
       );
     }
   }
-  flattenTextOnlyBlocks(messages);
   return replaced;
 }

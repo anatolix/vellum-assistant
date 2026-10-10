@@ -34,6 +34,7 @@ import {
   type AppHiddenSignal,
   type AppResumeSignal,
 } from "@/lib/event-bus";
+import { recordDiagnostic } from "@/lib/diagnostics";
 import { resetReconnectCursor } from "@/lib/streaming/reconnect-cursor";
 import {
   clearSseReconnectHandler,
@@ -264,14 +265,40 @@ export const sseService: SseService = {
     // window to deliver notifications.
     const drainChannel = new MessageChannel();
     let drainScheduled = false;
+    // A delayed or lost MessagePort task must not strand received envelopes.
+    // The timer is a backstop; MessageChannel remains the primary scheduler
+    // because background tabs throttle timers.
+    const DRAIN_FALLBACK_MS = 1_000;
+    let drainFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearDrainFallback = (): void => {
+      if (drainFallbackTimer !== null) {
+        clearTimeout(drainFallbackTimer);
+        drainFallbackTimer = null;
+      }
+    };
     const scheduleDrain = (): void => {
       if (!drainScheduled) {
         drainScheduled = true;
         drainChannel.port2.postMessage(null);
       }
+      if (drainFallbackTimer === null) {
+        drainFallbackTimer = setTimeout(() => {
+          drainFallbackTimer = null;
+          if (cancelled || pendingEnvelopes.length === 0) {
+            return;
+          }
+          recordDiagnostic("sse_drain_fallback", {
+            pending: pendingEnvelopes.length,
+            drainScheduled,
+          });
+          drainScheduled = false;
+          flushPendingEnvelopes();
+        }, DRAIN_FALLBACK_MS);
+      }
     };
     drainChannel.port1.onmessage = () => {
       drainScheduled = false;
+      clearDrainFallback();
       flushPendingEnvelopes();
     };
     const enqueueEnvelope = (envelope: AssistantEventEnvelope): void => {
@@ -611,6 +638,7 @@ export const sseService: SseService = {
       unsubPowerUnlock();
       unsubReachabilityRetry();
       unsubAnchorRequested();
+      clearDrainFallback();
       flushPendingEnvelopes();
       drainChannel.port1.onmessage = null;
       drainChannel.port1.close();

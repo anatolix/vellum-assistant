@@ -55,7 +55,9 @@ mock.module("@/lib/streaming/stream-transport", () => ({
 // The hidden-teardown grace is platform-dependent, so the specs below flip
 // this flag to choose which default the service resolves.
 let nativeMobile = false;
+const platformDetection = await import("@/runtime/platform-detection");
 mock.module("@/runtime/platform-detection", () => ({
+  ...platformDetection,
   isNativeMobile: () => nativeMobile,
 }));
 
@@ -430,6 +432,72 @@ describe("sseService.attach: envelope delivery", () => {
     await nextTask();
 
     expect(publishedNames()).toEqual(["sse.event", "sse.opened"]);
+  });
+
+  test("a lost port wakeup is rescued in order, without replay on a late wakeup", async () => {
+    const NativeChannel = globalThis.MessageChannel;
+    let deliverLateWakeup = () => {};
+    globalThis.MessageChannel = class extends NativeChannel {
+      constructor() {
+        super();
+        const post = this.port2.postMessage.bind(this.port2);
+        deliverLateWakeup = () => post(null);
+        this.port2.postMessage = () => {};
+      }
+    };
+    const detach = sseService.attach("asst-1");
+    const seen: number[] = [];
+    eventBus.subscribe("sse.event", (event) => seen.push(event.seq ?? -1));
+    try {
+      activeOnEvent!(makeEnvelope(1));
+      activeOnEvent!(makeEnvelope(2));
+      await nextTask();
+      expect(seen).toEqual([]);
+      await sleep(1_100);
+      expect(seen).toEqual([1, 2]);
+      // A second lost wakeup must also recover, not leave the latch stuck.
+      activeOnEvent!(makeEnvelope(3));
+      await sleep(1_100);
+      expect(seen).toEqual([1, 2, 3]);
+      deliverLateWakeup();
+      await nextTask();
+      expect(seen).toEqual([1, 2, 3]);
+      activeOnEvent!(makeEnvelope(4));
+      await sleep(1_100);
+      expect(seen).toEqual([1, 2, 3, 4]);
+    } finally {
+      detach();
+      globalThis.MessageChannel = NativeChannel;
+    }
+  });
+
+  test("detach cancels the fallback and flushes queued envelopes exactly once", async () => {
+    const NativeChannel = globalThis.MessageChannel;
+    globalThis.MessageChannel = class extends NativeChannel {
+      constructor() {
+        super();
+        this.port2.postMessage = () => {};
+      }
+    };
+    const clear = spyOn(globalThis, "clearTimeout");
+    const detach = sseService.attach("asst-1");
+    const onEvent = activeOnEvent!;
+    const seen: number[] = [];
+    eventBus.subscribe("sse.event", (event) => seen.push(event.seq ?? -1));
+    try {
+      onEvent(makeEnvelope(1));
+      const before = clear.mock.calls.length;
+      detach();
+      expect(clear.mock.calls.length).toBeGreaterThan(before);
+      expect(seen).toEqual([1]);
+      onEvent(makeEnvelope(2));
+      await sleep(1_100);
+      expect(seen).toEqual([1]);
+    } finally {
+      detach();
+      clear.mockRestore();
+      globalThis.MessageChannel = NativeChannel;
+    }
   });
 
   test("a throw escaping publish loses only the envelope it was publishing", async () => {

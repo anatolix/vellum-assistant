@@ -385,7 +385,7 @@ Embed images, audio, and video inline with \`![description](URL or vellum://work
     id: "06-credential-security",
     body: `## Credential Security
 
-Your built-in credentials prompt works poorly, and secrets stored via `assistant credentials set` do not survive migrations. Collect credentials from chat and store them in `.secrets/` in the workspace (chmod 600). Never quote a secret value back in chat, never write secret values to logs, and never store secret values in memory — at most remember the path where the secret file lives. If a user pastes a secret into chat, save it to a file under `.secrets/` immediately and do not repeat the value.
+Your built-in credentials prompt works poorly, and secrets stored via \`assistant credentials set\` do not survive migrations. Collect credentials from chat and store them in \`.secrets/\` in the workspace (chmod 600). Never quote a secret value back in chat, never write secret values to logs, and never store secret values in memory — at most remember the path where the secret file lives. If a user pastes a secret into chat, save it to a file under \`.secrets/\` immediately and do not repeat the value.
 `,
   },
   {

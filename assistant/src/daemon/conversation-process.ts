@@ -36,6 +36,8 @@ import {
 } from "../persistence/conversation-crud.js";
 import { isReplyPushIneligibleUserMessage } from "../persistence/conversation-types.js";
 import type { ContextWindowResult } from "../plugins/defaults/compaction/window-manager.js";
+import { tagBlocksSource, tagMessageSource } from "../providers/source-ids.js";
+import type { Message } from "../providers/types.js";
 import { getCurrentSeq } from "../runtime/assistant-stream-state.js";
 import {
   type GuardianPendingScope,
@@ -72,6 +74,16 @@ import { restingTrust, turnOrRestingTrust } from "./trust-context-types.js";
 import { resolveVerificationSessionIntent } from "./verification-session-intent.js";
 
 const log = getLogger("conversation-process");
+
+function appendPersistedMessage(
+  conversation: Conversation,
+  message: Message,
+  rowId: string,
+): void {
+  tagBlocksSource(message.content, rowId);
+  tagMessageSource(message, rowId);
+  conversation.messages.push(message);
+}
 
 /** Locale-formatted count for the user-facing context stats cards. */
 const fmt = (n: number | undefined) => (n ?? 0).toLocaleString("en-US");
@@ -957,7 +969,7 @@ async function drainSingleMessage(
         next.content,
         next.attachments,
       );
-      await addMessage(
+      const persisted = await addMessage(
         conversation.conversationId,
         "user",
         await serializePersistedUserMessageContent(
@@ -968,7 +980,7 @@ async function drainSingleMessage(
         { metadata: drainChannelMeta },
       );
       persistedCompactMessage = true;
-      conversation.messages.push(cleanUserMsg);
+      appendPersistedMessage(conversation, cleanUserMsg, persisted.id);
 
       conversation.emitActivityState("thinking", "context_compacting", {
         requestId: next.requestId,
@@ -981,13 +993,13 @@ async function drainSingleMessage(
       const responseText = formatCompactResult(result);
 
       const assistantMsg = createAssistantMessage(responseText);
-      await addMessage(
+      const persistedAssistant = await addMessage(
         conversation.conversationId,
         "assistant",
         JSON.stringify(assistantMsg.content),
         { metadata: { ...drainChannelMeta, sentAt: Date.now() } },
       );
-      conversation.messages.push(assistantMsg);
+      appendPersistedMessage(conversation, assistantMsg, persistedAssistant.id);
 
       next.onEvent({
         type: "assistant_text_delta",
@@ -2248,7 +2260,7 @@ export async function processMessage(
         { metadata: pmChannelMeta },
       );
       persistedCompactMessage = true;
-      conversation.messages.push(cleanUserMsg);
+      appendPersistedMessage(conversation, cleanUserMsg, persisted.id);
 
       conversation.emitActivityState("thinking", "context_compacting", {
         requestId,
@@ -2258,13 +2270,13 @@ export async function processMessage(
       const responseText = formatCompactResult(result);
 
       const assistantMsg = createAssistantMessage(responseText);
-      await addMessage(
+      const persistedAssistant = await addMessage(
         conversation.conversationId,
         "assistant",
         JSON.stringify(assistantMsg.content),
         { metadata: pmChannelMeta },
       );
-      conversation.messages.push(assistantMsg);
+      appendPersistedMessage(conversation, assistantMsg, persistedAssistant.id);
 
       onEvent({
         type: "assistant_text_delta",

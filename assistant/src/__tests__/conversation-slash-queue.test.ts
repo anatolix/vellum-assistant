@@ -7,6 +7,12 @@ import {
   conversationMessagesSyncTag,
   type SyncChangedEvent,
 } from "../daemon/message-types/sync.js";
+import {
+  buildVellumWireExtension,
+  collectSourceIds,
+  messageSourceId,
+  messageSourceIds,
+} from "../providers/source-ids.js";
 import type { Message, ProviderResponse } from "../providers/types.js";
 
 // ---------------------------------------------------------------------------
@@ -29,6 +35,8 @@ mock.module("../permissions/trust-store.js", () => ({
 mock.module("../security/secret-allowlist.js", () => ({
   resetAllowlist: () => {},
 }));
+
+const persistedRows: Array<{ id: string; role: string; content: string }> = [];
 
 mock.module("../persistence/conversation-crud.js", () => ({
   setConversationProcessingStartedAt: () => {},
@@ -53,8 +61,10 @@ mock.module("../persistence/conversation-crud.js", () => ({
     totalEstimatedCost: 0,
   }),
   createConversation: () => ({ id: "conv-1" }),
-  addMessage: (_convId: string, _role: string, _content: string) => {
-    return { id: `msg-${Date.now()}` };
+  addMessage: (_convId: string, role: string, content: string) => {
+    const row = { id: `msg-${persistedRows.length}`, role, content };
+    persistedRows.push(row);
+    return row;
   },
   updateConversationUsage: () => {},
   updateConversationTitle: () => {},
@@ -285,6 +295,7 @@ function syncChangedMessages(): {
 describe("Conversation queue — slash-like messages pass through to agent loop", () => {
   beforeEach(() => {
     pendingRuns = [];
+    persistedRows.length = 0;
   });
 
   test("queued slash-like input does not stall queue — batches with siblings", async () => {
@@ -476,6 +487,83 @@ describe("Conversation queue — slash-like messages pass through to agent loop"
     await resolveRun(2);
     await new Promise((r) => setTimeout(r, 50));
   });
+
+  for (const path of ["direct", "queued"] as const) {
+    test(`${path} /compact tags persisted messages before compaction and export`, async () => {
+      const conversation = makeConversation();
+      await conversation.loadFromDb();
+      let compactCalls = 0;
+      conversation.forceCompact = async () => {
+        compactCalls++;
+        const user = conversation.messages.at(-1)!;
+        expect(persistedRows).toHaveLength(1);
+        expect(user.role).toBe("user");
+        expect(collectSourceIds(user.content)).toEqual([persistedRows[0]!.id]);
+        expect(messageSourceId(user)).toBe(persistedRows[0]!.id);
+        return {
+          messages: conversation.messages,
+          compacted: true,
+          previousEstimatedInputTokens: 100,
+          estimatedInputTokens: 50,
+          maxInputTokens: 200,
+          thresholdTokens: 150,
+          compactedMessages: 0,
+          compactedPersistedMessages: 0,
+          summaryCalls: 1,
+          summaryInputTokens: 100,
+          summaryOutputTokens: 50,
+          summaryModel: "mock",
+          summaryText: "summary",
+        };
+      };
+      const events: AssistantEvent[] = [];
+      const options = {
+        content: "/compact",
+        attachments: [],
+        requestId: "req-compact",
+        onEvent: (event: AssistantEvent) => events.push(event),
+      };
+      if (path === "direct") {
+        const id = await conversation.processMessage(options);
+        expect(id).toBe(persistedRows[0]!.id);
+      } else {
+        expect(
+          conversation.enqueueMessage({ ...options, queueWhenIdle: true })
+            .queued,
+        ).toBe(true);
+        await conversation.drainQueue();
+        expect(events.some((event) => event.type === "message_dequeued")).toBe(
+          true,
+        );
+      }
+      expect(compactCalls).toBe(1);
+      expect(events.some((event) => event.type === "error")).toBe(false);
+      expect(events.some((event) => event.type === "message_complete")).toBe(
+        true,
+      );
+      expect(persistedRows.map((row) => row.role)).toEqual([
+        "user",
+        "assistant",
+      ]);
+      expect(conversation.messages).toHaveLength(2);
+      for (const [index, message] of conversation.messages.entries()) {
+        expect(collectSourceIds(message.content)).toEqual([
+          persistedRows[index]!.id,
+        ]);
+        expect(messageSourceId(message)).toBe(persistedRows[index]!.id);
+        expect(JSON.stringify(message.content)).toBe(
+          persistedRows[index]!.content,
+        );
+      }
+      expect(
+        buildVellumWireExtension(conversation.messages.map(messageSourceIds))
+          ?.messages,
+      ).toEqual([
+        { index: 0, source_ids: [persistedRows[0]!.id] },
+        { index: 1, source_ids: [persistedRows[1]!.id] },
+      ]);
+    });
+  }
 
   test("/compact failure still emits message-history sync after persisting the user message", async () => {
     const conversation = makeConversation();

@@ -67,6 +67,7 @@ import {
   isEchoSuppressedUserMessage,
   SIGHT_FRAME_ATTACHMENT_IDS_KEY,
 } from "../persistence/conversation-types.js";
+import { tagPersistedMessageSource } from "../providers/source-ids.js";
 import {
   attachmentIdFragment,
   type ContentBlock,
@@ -1682,6 +1683,7 @@ export async function persistQueuedMessageBody(
       },
       "persistUserMessage: content blocks being sent to model",
     );
+    tagPersistedMessageSource(llmMessage, persistedUserMessage.id);
     ctx.messages.push(llmMessage);
     pushedToHistory = true;
 

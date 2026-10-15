@@ -35,7 +35,7 @@ import {
 } from "../persistence/conversation-crud.js";
 import { isReplyPushIneligibleUserMessage } from "../persistence/conversation-types.js";
 import type { ContextWindowResult } from "../plugins/defaults/compaction/window-manager.js";
-import { tagBlocksSource, tagMessageSource } from "../providers/source-ids.js";
+import { tagPersistedMessageSource } from "../providers/source-ids.js";
 import type { Message } from "../providers/types.js";
 import { getCurrentSeq } from "../runtime/assistant-stream-state.js";
 import {
@@ -79,8 +79,7 @@ function appendPersistedMessage(
   message: Message,
   rowId: string,
 ): void {
-  tagBlocksSource(message.content, rowId);
-  tagMessageSource(message, rowId);
+  tagPersistedMessageSource(message, rowId);
   conversation.messages.push(message);
 }
 

@@ -28,6 +28,7 @@ import {
   setConversationOriginInterfaceIfUnset,
 } from "../persistence/conversation-crud.js";
 import { updateMetaFile } from "../persistence/conversation-disk-view.js";
+import { tagPersistedMessageSource } from "../providers/source-ids.js";
 import { broadcastMessage } from "../runtime/assistant-event-hub.js";
 import { DAEMON_INTERNAL_ASSISTANT_ID } from "../runtime/assistant-scope.js";
 import { publishConversationMessagesChanged } from "../runtime/sync/resource-sync-events.js";
@@ -660,6 +661,7 @@ export async function processMessage(
       ),
       { metadata: compactUserMeta },
     );
+    tagPersistedMessageSource(cleanMsg, persisted.id);
     conversation.getMessages().push(cleanMsg);
 
     conversation.emitActivityState("thinking", "context_compacting");
@@ -672,6 +674,7 @@ export async function processMessage(
       JSON.stringify(assistantMsg.content),
       { metadata: compactChannelMeta },
     );
+    tagPersistedMessageSource(assistantMsg, persistedAssistant.id);
     conversation.getMessages().push(assistantMsg);
     publishConversationMessagesChanged(conversationId);
     return {

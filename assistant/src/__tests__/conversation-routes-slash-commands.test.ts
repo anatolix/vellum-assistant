@@ -10,6 +10,9 @@ import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 
+import { collectSourceIds, messageSourceIds } from "../providers/source-ids.js";
+import type { Message } from "../providers/types.js";
+import { captureSourceIdWire } from "./helpers/capture-source-id-wire.js";
 import { setConfig } from "./helpers/set-config.js";
 
 mock.module("../config/env.js", () => ({ isHttpAuthDisabled: () => true }));
@@ -210,23 +213,27 @@ function makeConversation() {
     ) => undefined,
   );
   const setPreactivatedSkillIds = mock((_ids: string[] | undefined) => {});
-  const forceCompact = mock(async () => ({
-    messages: [],
-    compacted: true,
-    previousEstimatedInputTokens: 12000,
-    estimatedInputTokens: 10000,
-    maxInputTokens: 150000,
-    thresholdTokens: 120000,
-    compactedMessages: 2,
-    compactedPersistedMessages: 2,
-    summaryCalls: 1,
-    summaryInputTokens: 500,
-    summaryOutputTokens: 100,
-    summaryModel: "claude-opus-4-7",
-    summaryText: "Summary",
-  }));
+  const messages: Message[] = [];
+  let sourceIdsAtCompaction: string[][] = [];
+  const forceCompact = mock(async () => {
+    sourceIdsAtCompaction = messages.map(messageSourceIds);
+    return {
+      messages: [],
+      compacted: true,
+      previousEstimatedInputTokens: 12000,
+      estimatedInputTokens: 10000,
+      maxInputTokens: 150000,
+      thresholdTokens: 120000,
+      compactedMessages: 2,
+      compactedPersistedMessages: 2,
+      summaryCalls: 1,
+      summaryInputTokens: 500,
+      summaryOutputTokens: 100,
+      summaryModel: "claude-opus-4-7",
+      summaryText: "Summary",
+    };
+  });
   const events: unknown[] = [];
-  const messages: unknown[] = [];
   let processing = false;
   let owner = 0;
   const conversation = {
@@ -306,6 +313,7 @@ function makeConversation() {
     events,
     messages,
     forceCompact,
+    sourceIdsAtCompaction: () => sourceIdsAtCompaction,
   };
 }
 
@@ -373,8 +381,13 @@ describe("handleSendMessage slash command interception", () => {
   });
 
   test("handles /compact without calling agent loop and formats the compaction max", async () => {
-    const { conversation, persistUserMessage, runAgentLoop, forceCompact } =
-      makeConversation();
+    const {
+      conversation,
+      persistUserMessage,
+      runAgentLoop,
+      forceCompact,
+      sourceIdsAtCompaction,
+    } = makeConversation();
     const res = await callHandler(
       (args) => handleSendMessage(args, makeDeps(conversation)),
       makeRequest("/compact"),
@@ -393,6 +406,23 @@ describe("handleSendMessage slash command interception", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(forceCompact).toHaveBeenCalledTimes(1);
+    expect(sourceIdsAtCompaction()).toEqual([["persisted-user-id"]]);
+    const history = conversation.getMessages();
+    expect(history.map(messageSourceIds)).toEqual([
+      ["persisted-user-id"],
+      ["persisted-assistant-id"],
+    ]);
+    expect(history.map((message) => collectSourceIds(message.content))).toEqual(
+      [["persisted-user-id"], ["persisted-assistant-id"]],
+    );
+    const wire = await captureSourceIdWire([
+      ...history,
+      { role: "user", content: [{ type: "text", text: "continue" }] },
+    ]);
+    expect(wire._vellum?.messages).toEqual([
+      { index: 1, source_ids: ["persisted-user-id"] },
+      { index: 2, source_ids: ["persisted-assistant-id"] },
+    ]);
     expect(formatCompactResultMock).toHaveBeenCalledWith(
       expect.objectContaining({ maxInputTokens: 150000 }),
     );

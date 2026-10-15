@@ -5,6 +5,7 @@ import {
   recordConversationPersistedSeq,
 } from "../../persistence/conversation-crud.js";
 import { SYSTEM_CARD_MESSAGE_KIND } from "../../persistence/conversation-types.js";
+import { tagPersistedMessageSource } from "../../providers/source-ids.js";
 import type { Message } from "../../providers/types.js";
 import { broadcastMessage } from "../assistant-event-hub.js";
 import { getCurrentSeq } from "../assistant-stream-state.js";
@@ -83,6 +84,7 @@ export async function persistSystemCard(opts: {
     JSON.stringify(assistantMsg.content),
     { metadata: { ...metadata, messageKind: SYSTEM_CARD_MESSAGE_KIND } },
   );
+  tagPersistedMessageSource(assistantMsg, persistedAssistant.id);
   if (endsTurn) {
     emitCannedMessageComplete(
       broadcastMessage,

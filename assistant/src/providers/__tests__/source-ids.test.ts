@@ -5,7 +5,9 @@ import {
   blockSourceId,
   buildVellumWireExtension,
   collectSourceIds,
+  messageSourceId,
   tagBlocksSource,
+  tagPersistedMessageSource,
 } from "../source-ids.js";
 import type { ContentBlock, Message } from "../types.js";
 
@@ -14,6 +16,19 @@ function text(t: string): ContentBlock {
 }
 
 describe("source-ids side-channel", () => {
+  test("persisted message tagging covers blocks and empty rows without changing JSON", () => {
+    for (const content of [[], [text("body")]]) {
+      const message: Message = { role: "assistant", content };
+      const serialized = JSON.stringify(message);
+      tagPersistedMessageSource(message, "row-1");
+      expect(messageSourceId(message)).toBe("row-1");
+      expect(collectSourceIds(message.content)).toEqual(
+        content.length ? ["row-1"] : [],
+      );
+      expect(JSON.stringify(message)).toBe(serialized);
+    }
+  });
+
   test("first tag wins; untagged blocks report undefined", () => {
     const a = text("a");
     const b = text("b");

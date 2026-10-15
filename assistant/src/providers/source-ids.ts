@@ -101,6 +101,15 @@ export function tagMessageSource(
   });
 }
 
+/** Tag a persisted row's live message and blocks before it enters history. */
+export function tagPersistedMessageSource(
+  message: Message,
+  rowId: string,
+): void {
+  tagBlocksSource(message.content, rowId);
+  tagMessageSource(message, rowId);
+}
+
 export function messageSourceId(message: Message): string | undefined {
   const id = taggedBlock(message as unknown as ContentBlock)[MESSAGE_SOURCE];
   return typeof id === "string" ? id : undefined;

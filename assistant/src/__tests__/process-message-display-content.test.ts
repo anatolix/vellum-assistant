@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 
+import { collectSourceIds, messageSourceIds } from "../providers/source-ids.js";
+import { captureSourceIdWire } from "./helpers/capture-source-id-wire.js";
+
 const addMessageCalls: Array<{
   conversationId: string;
   role: string;
@@ -197,6 +200,7 @@ function makeTestConversation() {
       _options: unknown,
     ) => undefined,
   );
+  let sourceIdsAtCompaction: string[][] = [];
   const conversation = {
     conversationId: messagingCtx.conversationId,
     usageStats: { inputTokens: 0, outputTokens: 0, estimatedCost: 0 },
@@ -223,12 +227,16 @@ function makeTestConversation() {
     setHostAppControlProxy: () => {},
     setCommandIntent: () => {},
     emitActivityState: () => {},
-    forceCompact: mock(async () => ({
-      compacted: false,
-      reason: "nothing to compact",
-      estimatedInputTokens: 10,
-      maxInputTokens: 100,
-    })),
+    forceCompact: mock(async () => {
+      sourceIdsAtCompaction = messages.map(messageSourceIds);
+      return {
+        compacted: false,
+        reason: "nothing to compact",
+        estimatedInputTokens: 10,
+        maxInputTokens: 100,
+      };
+    }),
+    sourceIdsAtCompaction: () => sourceIdsAtCompaction,
     setTurnChannelContext: (ctx: TurnChannelContext) => {
       turnChannelContext = ctx;
     },
@@ -520,6 +528,23 @@ describe("processMessage displayContent", () => {
 
     const conversation = await expectEmptyDisplayContentHonored(modelContent);
     expect(conversation.forceCompact).toHaveBeenCalledTimes(1);
+    expect(conversation.sourceIdsAtCompaction()).toEqual([["persisted-1"]]);
+    const history = conversation.getMessages();
+    expect(history.map(messageSourceIds)).toEqual([
+      ["persisted-1"],
+      ["persisted-2"],
+    ]);
+    expect(history.map((message) => collectSourceIds(message.content))).toEqual(
+      [["persisted-1"], ["persisted-2"]],
+    );
+    const wire = await captureSourceIdWire([
+      ...history,
+      { role: "user", content: [{ type: "text", text: "continue" }] },
+    ]);
+    expect(wire._vellum?.messages).toEqual([
+      { index: 1, source_ids: ["persisted-1"] },
+      { index: 2, source_ids: ["persisted-2"] },
+    ]);
   });
 });
 

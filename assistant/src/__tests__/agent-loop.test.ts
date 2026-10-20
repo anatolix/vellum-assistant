@@ -1667,6 +1667,50 @@ describe("AgentLoop", () => {
     expect(history[2].role).toBe("user");
   });
 
+  test("resuming a checkpoint history delivers completed results without executing tools again", async () => {
+    const { provider, calls } = createMockProvider([
+      toolUseResponse("tool-123", "read_file", { path: "/example.txt" }),
+      textResponse("Done"),
+    ]);
+    let executions = 0;
+    const loop = new AgentLoop({
+      provider,
+      systemPrompt: "system",
+      conversationId: "test-conversation",
+      tools: dummyTools,
+      toolExecutor: async () => {
+        executions++;
+        return { content: "completed result", isError: false };
+      },
+    });
+    const options = {
+      requestId: "req-original",
+      onEvent: () => {},
+      trust: {
+        sourceChannel: "vellum" as const,
+        trustClass: "unknown" as const,
+      },
+    };
+    const paused = await loop.run({
+      ...options,
+      messages: [userMessage],
+      onCheckpoint: () => "handoff",
+    });
+    expect(paused.exitReason).toBe("handoff");
+    expect(calls).toHaveLength(1);
+    await loop.run({ ...options, messages: paused.history });
+    expect(calls).toHaveLength(2);
+    expect(calls[1].messages).toEqual(paused.history);
+    expect(calls[1].messages.at(-1)?.content).toContainEqual(
+      expect.objectContaining({
+        type: "tool_result",
+        tool_use_id: "tool-123",
+        content: "completed result",
+      }),
+    );
+    expect(executions).toBe(1);
+  });
+
   // 19. Without a checkpoint callback, behavior is unchanged
   test("without checkpoint callback behavior is unchanged", async () => {
     const { provider, calls } = createMockProvider([

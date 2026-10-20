@@ -132,6 +132,10 @@ export function reinjectInterruptTurnNote(
 // ── Context Interfaces ───────────────────────────────────────────────
 
 export interface AbortContext {
+  checkpointContinuation?: {
+    readonly controller: AbortController;
+    readonly cronRunId: string | null;
+  };
   readonly conversationId: string;
   readonly currentTurnCronRunId?: string | null;
   readonly currentRequestId?: string;
@@ -308,6 +312,12 @@ export function discardQueueOnAbort(
 
 /** Cancel only the scheduled firing's queued continuations and active turn. */
 export function abortScheduledRun(ctx: AbortContext, runId: string): void {
+  if (ctx.checkpointContinuation?.cronRunId === runId) {
+    ctx.checkpointContinuation.controller.abort(
+      createAbortReason("schedule_timeout", "scheduler", ctx.conversationId),
+    );
+    ctx.checkpointContinuation = undefined;
+  }
   for (const dispatch of ctx.pendingQueuedDispatches?.get(runId) ?? []) {
     dispatch.controller.abort(
       createAbortReason("schedule_timeout", "scheduler", ctx.conversationId),
@@ -333,6 +343,8 @@ export function abortConversation(
       "abortConversation:default",
       ctx.conversationId,
     );
+  ctx.checkpointContinuation?.controller.abort(effectiveReason);
+  ctx.checkpointContinuation = undefined;
   const preservedDispatches = isUserInterruptAbort(effectiveReason)
     ? new Set(
         [...(ctx.pendingQueuedDispatches?.get(null) ?? [])].filter((dispatch) =>

@@ -71,6 +71,7 @@ import type { UserMessageAttachment } from "./message-protocol.js";
 import { buildTransportHints } from "./transport-hints.js";
 import { sameTrustIdentity, type TrustContext } from "./trust-context-types.js";
 import { restingTrust, turnOrRestingTrust } from "./trust-context-types.js";
+import { hasPendingTurnFinalization } from "./turn-finalization.js";
 import { resolveVerificationSessionIntent } from "./verification-session-intent.js";
 
 const log = getLogger("conversation-process");
@@ -493,6 +494,65 @@ function requeueDrainedMessages(
 export async function drainQueue(
   conversation: Conversation,
   reason: QueueDrainReason = "loop_complete",
+): Promise<void> {
+  await drainQueuedMessages(conversation, reason);
+  const continuation = conversation.checkpointContinuation;
+  if (
+    !continuation ||
+    continuation.controller.signal.aborted ||
+    conversation.isProcessing() ||
+    conversation.hasQueuedMessages() ||
+    conversation.pendingQueuedDispatches?.size ||
+    hasPendingTurnFinalization(conversation.conversationId)
+  ) {
+    return;
+  }
+  // Consume before claiming or awaiting so concurrent drains cannot resume twice.
+  conversation.checkpointContinuation = undefined;
+  const owner = conversation.acquireProcessing();
+  if (owner === null) {
+    return;
+  }
+  conversation.abortController = continuation.controller;
+  conversation.currentTurnCronRunId = continuation.cronRunId;
+  try {
+    await conversation.ensureProcessingMarker(owner);
+  } catch (err) {
+    if (conversation.holdsProcessingClaim(owner)) {
+      conversation.abortController = null;
+      conversation.currentTurnCronRunId = undefined;
+      if (!continuation.controller.signal.aborted) {
+        conversation.checkpointContinuation = continuation;
+      }
+      conversation.releaseProcessing(owner);
+    }
+    throw err;
+  }
+  if (
+    continuation.controller.signal.aborted ||
+    !conversation.holdsProcessingClaim(owner)
+  ) {
+    if (conversation.abortController === continuation.controller) {
+      conversation.abortController = null;
+      conversation.currentTurnCronRunId = undefined;
+    }
+    conversation.releaseProcessing(owner);
+    return;
+  }
+  try {
+    await continuation.resume();
+  } finally {
+    if (conversation.holdsProcessingClaim(owner)) {
+      conversation.abortController = null;
+      conversation.currentTurnCronRunId = undefined;
+      conversation.releaseProcessing(owner);
+    }
+  }
+}
+
+async function drainQueuedMessages(
+  conversation: Conversation,
+  reason: QueueDrainReason,
 ): Promise<void> {
   // After a steer, drain only the promoted head message — don't batch
   // the remaining queue items into the same turn.

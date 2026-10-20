@@ -474,6 +474,8 @@ export async function runAgentLoopImpl(
   userMessageId: string,
   onEvent: (msg: AssistantEvent) => void,
   options?: {
+    /** One-shot resumption of a handoff whose queued successor disappeared. */
+    checkpointHistory?: Message[];
     isInteractive?: boolean;
     isUserMessage?: boolean;
     titleText?: string;
@@ -633,6 +635,7 @@ export async function runAgentLoopImpl(
     requestId: reqId,
   });
   let yieldedForHandoff = false;
+  let checkpointModeSuccessor: string | undefined;
   // The messages the most recent agent-loop run appended on top of its base —
   // the loop's own new-output boundary, persisted as this turn's new messages.
   let lastRunNewMessages: Message[] = [];
@@ -908,6 +911,13 @@ export async function runAgentLoopImpl(
   // this between model calls so a confirmed profile session opened by a tool
   // applies to later tool executions and nested subagents in the same turn.
   ctx.currentTurnOverrideProfile = turnOverrideProfile;
+
+  const capturedTurnIngress = {
+    currentTurnAuthContext: ctx.currentTurnAuthContext,
+    currentTurnSourceActorPrincipalId: ctx.currentTurnSourceActorPrincipalId,
+    currentTurnActorFallbackSuppressed: ctx.currentTurnActorFallbackSuppressed,
+    transportHints: ctx.transportHints,
+  };
 
   // Capture the turn channel context *before* any awaits so a second
   // message from a different channel can't overwrite it mid-flight.
@@ -1593,11 +1603,13 @@ export async function runAgentLoopImpl(
     // The scope lets instrumented steps deep inside the hook chain (memory
     // retrieval, injectors) record sub-spans of the memory_context phase
     // without the tracker being threaded through the plugin contracts.
-    const finalUserPromptCtx = await runWithLatencySubSpans(
-      latencyTracker,
-      MEMORY_CONTEXT_PHASE_KEY,
-      () => runHook(HOOKS.USER_PROMPT_SUBMIT, userPromptCtx),
-    );
+    const finalUserPromptCtx = options?.checkpointHistory
+      ? userPromptCtx
+      : await runWithLatencySubSpans(
+          latencyTracker,
+          MEMORY_CONTEXT_PHASE_KEY,
+          () => runHook(HOOKS.USER_PROMPT_SUBMIT, userPromptCtx),
+        );
     latencyTracker.mark("prompt_hook_end");
     // Built-in history repair: normalize the working history to satisfy the
     // provider's tool-use/tool-result pairing and role-alternation rules
@@ -1639,10 +1651,9 @@ export async function runAgentLoopImpl(
     // the conversation supplies), so the bound holds across a compaction rather
     // than only from the next turn. The overflow ladder's media stubbing still
     // governs everything the user deliberately attached.
-    const runMessages = applySightFrameRetention(
-      repairedMessages,
-      ctx.conversationId,
-    );
+    const runMessages =
+      options?.checkpointHistory ??
+      applySightFrameRetention(repairedMessages, ctx.conversationId);
 
     // Reset the manager's turn-scoped overflow-recovery ladder at the turn
     // boundary so a new turn starts the ladder fresh from the emergency rung.
@@ -2194,6 +2205,47 @@ export async function runAgentLoopImpl(
     // becomes the next turn's in-memory history.
     await tagToolResultSources(state, [restoredHistory]);
     ctx.messages = restoredHistory;
+    if (yieldedForHandoff && !abortController.signal.aborted) {
+      const turnContext = {
+        ...capturedTurnIngress,
+        currentRequestId: reqId,
+        currentTurnClientMessageId: ctx.currentTurnClientMessageId,
+        currentActiveSurfaceId: ctx.currentActiveSurfaceId,
+        allowedToolNames: ctx.allowedToolNames,
+        diskPressureCleanupModeActive: ctx.diskPressureCleanupModeActive,
+        preactivatedSkillIds: ctx.preactivatedSkillIds,
+        approvedViaPromptThisTurn: ctx.approvedViaPromptThisTurn,
+        onConfirmationOutcome: ctx.onConfirmationOutcome,
+        taskRunId: ctx.taskRunId,
+        commandIntent: ctx.commandIntent,
+        currentTurnWorkOrigins: ctx.currentTurnWorkOrigins,
+        currentTurnChannelContext: capturedTurnChannelContext,
+        currentTurnInterfaceContext: capturedTurnInterfaceContext,
+        channelCapabilities: ctx.currentTurnChannelCapabilities,
+        clientOs: ctx.currentTurnClientOs,
+        visibleAppId: ctx.currentTurnVisibleAppId,
+      };
+      const surfaceAction = ctx.surfaceActionRequestIds.has(reqId);
+      ctx.checkpointContinuation = {
+        controller: abortController,
+        cronRunId: turnCronRunId,
+        resume: async () => {
+          Object.assign(ctx, turnContext);
+          ctx.abortController = abortController;
+          if (checkpointModeSuccessor) {
+            ctx.modeSessions.transferTurn(checkpointModeSuccessor, reqId);
+          }
+          if (surfaceAction) {
+            ctx.surfaceActionRequestIds.add(reqId);
+          }
+          await runAgentLoopImpl(ctx, content, userMessageId, onEvent, {
+            ...options,
+            turnTrustContext: loopTrust,
+            checkpointHistory: restoredHistory,
+          });
+        },
+      };
+    }
 
     // The row's override is whichever profile served the last call.
     const mainRowOverrideProfile =
@@ -2398,6 +2450,7 @@ export async function runAgentLoopImpl(
       const nextRequestId = ctx.queue.snapshot()[0]?.requestId;
       if (nextRequestId) {
         ctx.modeSessions.transferTurn(reqId, nextRequestId);
+        checkpointModeSuccessor = nextRequestId;
       } else {
         settleModeSessionTurn(ctx, reqId, {
           status: "completed",
@@ -2432,6 +2485,9 @@ export async function runAgentLoopImpl(
     // that scheduled it.
     queueDeferredTurnTail(turnCompleted, criticalSectionMs);
   } catch (err) {
+    if (ctx.checkpointContinuation?.controller === abortController) {
+      ctx.checkpointContinuation = undefined;
+    }
     failedTurnAt = Date.now();
     clearConversationNotices(ctx.conversationId);
     // A turn that threw out of the loop is over too; see the happy path.
@@ -2625,9 +2681,16 @@ export async function runAgentLoopImpl(
       // genuinely wedged commit makes the interrupt queue its message rather
       // than race the commit for the working tree.
       if (outstandingCommit) {
-        void outstandingCommit
-          .then(closeTurnFinalization, closeTurnFinalization)
-          .catch(() => {});
+        const finishCommit = (): void => {
+          closeTurnFinalization();
+          if (ctx.checkpointContinuation?.controller === abortController) {
+            void ctx.kickDrainQueue(
+              "checkpoint_handoff",
+              "checkpoint_commit_settled",
+            );
+          }
+        };
+        void outstandingCommit.then(finishCommit, finishCommit).catch(() => {});
       } else {
         closeTurnFinalization();
       }

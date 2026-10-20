@@ -1,5 +1,13 @@
 import { rmSync, writeFileSync } from "node:fs";
-import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  test,
+} from "bun:test";
 
 import { CompactionCircuit } from "../agent/compaction-circuit.js";
 import type {
@@ -10,6 +18,10 @@ import type {
   ExitReason,
 } from "../agent/loop.js";
 import type { AssistantEvent } from "../api/index.js";
+import type { ModeSessionSummary } from "../api/mode-session.js";
+import { getConfig } from "../config/loader.js";
+import { ConversationModeSessionCoordinator } from "../daemon/conversation-mode-session.js";
+import { registerPlugin, unregisterPlugin } from "../plugins/registry.js";
 import type { Message, ProviderResponse } from "../providers/types.js";
 import { stampAndBuffer } from "../runtime/assistant-stream-state.js";
 import { createAbortReason } from "../util/abort-reasons.js";
@@ -3106,9 +3118,380 @@ describe("Conversation queue policy helpers", () => {
 // ---------------------------------------------------------------------------
 
 describe("Conversation checkpoint handoff", () => {
+  async function pauseHandoffAtCommit() {
+    const conversation = makeConversation();
+    await conversation.loadFromDb();
+    const commitEntered = Promise.withResolvers<void>();
+    const finishCommit = Promise.withResolvers<void>();
+    let commits = 0;
+    conversation.commitTurnChanges = async () => {
+      if (++commits === 1) {
+        commitEntered.resolve();
+        await finishCommit.promise;
+      }
+    };
+    const { id } = await conversation.persistUserMessage({
+      content: "original request",
+      requestId: "req-original",
+      cronRunId: "run-123",
+    });
+    const original = conversation.runAgentLoop("original request", id, {
+      cronRunId: "run-123",
+    });
+    await waitForPendingRun(1);
+    conversation.enqueueMessage({
+      content: "queued request",
+      requestId: "req-successor",
+    });
+    const run = pendingRuns[0];
+    await run.onCheckpoint!({
+      turnIndex: 0,
+      toolCount: 1,
+      hasToolUse: true,
+      history: run.messages,
+    });
+    await resolveRun(0);
+    await commitEntered.promise;
+    conversation.removeQueuedMessage("req-successor");
+    return { conversation, original, finishCommit };
+  }
   beforeEach(() => {
     pendingRuns = [];
   });
+  afterEach(() => {
+    unregisterPlugin("test-checkpoint-submissions");
+  });
+
+  test.each(["finalization", "classification"])(
+    "resumes completed tool results when the sole successor is deleted during %s",
+    async (window) => {
+      const conversation = makeConversation();
+      await conversation.loadFromDb();
+      const trust = {
+        trustClass: "trusted_contact" as const,
+        sourceChannel: "slack" as const,
+        requesterExternalUserId: "user-123",
+      };
+      conversation.setTrustContext(trust);
+      const originalChannel = {
+        userMessageChannel: "slack" as const,
+        assistantMessageChannel: "slack" as const,
+      };
+      const originalInterface = {
+        userMessageInterface: "web" as const,
+        assistantMessageInterface: "web" as const,
+      };
+      conversation.setTurnChannelContext(originalChannel);
+      conversation.setTurnInterfaceContext(originalInterface);
+      conversation.authContext = {
+        subject: "actor:user-123",
+        principalType: "actor",
+        assistantId: "assistant-123",
+        actorPrincipalId: "user-123",
+        scopeProfile: "actor_client_v1",
+        scopes: new Set(["chat.write"]),
+        policyEpoch: 1,
+      };
+      const originalAuth = conversation.authContext;
+      conversation.transportHints = ["original transport"];
+      let submissions = 0;
+      registerPlugin({
+        manifest: { name: "test-checkpoint-submissions", version: "1.0.0" },
+        hooks: {
+          "user-prompt-submit": async () => {
+            submissions++;
+          },
+        },
+      });
+      const commitEntered = Promise.withResolvers<void>();
+      const finishCommit = Promise.withResolvers<void>();
+      let commits = 0;
+      conversation.commitTurnChanges = async () => {
+        commits++;
+        if (commits === 1) {
+          commitEntered.resolve();
+          await finishCommit.promise;
+        }
+      };
+      const original = conversation.processMessage({
+        content: "original request",
+        attachments: [],
+        requestId: "req-original",
+        isInteractive: true,
+      });
+      await waitForPendingRun(1);
+      const session: ModeSessionSummary = {
+        id: "session-123",
+        conversationId: conversation.conversationId,
+        mode: "computer_use",
+        sourceStartedAt: 1,
+        firstIncludedAt: null,
+        firstIncludedMessageId: null,
+        lastActivityAt: 1,
+        lastOwnedMessageId: null,
+        revision: 1,
+        status: "active",
+        endedAt: null,
+        endReason: null,
+      };
+      const write = () => ({ ok: true as const, session });
+      const coordinator = new ConversationModeSessionCoordinator(
+        conversation.conversationId,
+        {
+          createId: () => session.id,
+          beginSession: write,
+          getSession: () => session,
+          updateActivity: write,
+          updateBoundaries: write,
+          advanceRevision: write,
+          finalize: write,
+          stampMessage: () => {},
+          publishMessagesChanged: () => {},
+        },
+      );
+      Object.defineProperty(conversation, "modeSessions", {
+        value: coordinator,
+      });
+      const handle = coordinator.activateSource({
+        sourceId: "source-123",
+        generation: 1,
+        mode: session.mode,
+        sourceStartedAt: 1,
+      });
+      expect(handle).toBeDefined();
+      coordinator.claimTurn("req-original", handle!, 1);
+      conversation.setTurnChannelContext({
+        userMessageChannel: "vellum",
+        assistantMessageChannel: "vellum",
+      });
+      conversation.setTurnInterfaceContext({
+        userMessageInterface: "cli",
+        assistantMessageInterface: "cli",
+      });
+      conversation.currentTurnAuthContext = undefined;
+      conversation.currentTurnSourceActorPrincipalId = "user-456";
+      conversation.transportHints = ["another transport"];
+      conversation.enqueueMessage({
+        content: window === "classification" ? "/status" : "queued request",
+        requestId: "req-successor",
+      });
+      const run = pendingRuns[0];
+      const history: Message[] = [
+        ...run.messages,
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "tool-123",
+              name: "example_tool",
+              input: {},
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tool-123",
+              content: "completed",
+            },
+          ],
+        },
+      ];
+      expect(
+        await run.onCheckpoint!({
+          turnIndex: 0,
+          toolCount: 1,
+          hasToolUse: true,
+          history,
+        }),
+      ).toBe("handoff");
+      run.resolve(history);
+      await commitEntered.promise;
+      expect(coordinator.getTurnOwner("req-successor")?.id).toBe(session.id);
+      conversation.setTrustContext({
+        trustClass: "guardian",
+        sourceChannel: "vellum",
+      });
+      if (window === "classification") {
+        const peek = conversation.queue.peek.bind(conversation.queue);
+        conversation.queue.peek = (index) => {
+          const message = peek(index);
+          if (message?.requestId === "req-successor") {
+            queueMicrotask(() => {
+              conversation.removeQueuedMessage("req-successor");
+            });
+          }
+          return message;
+        };
+      } else {
+        expect(conversation.removeQueuedMessage("req-successor")).toBeDefined();
+      }
+      finishCommit.resolve();
+      await original;
+      await waitForPendingRun(2);
+      expect(pendingRuns[1].messages).toEqual(history);
+      expect(conversation.currentRequestId).toBe("req-original");
+      expect(conversation.currentTurnTrustContext).toEqual(trust);
+      expect(conversation.currentTurnIsNonInteractive).toBe(false);
+      expect(conversation.getTurnChannelContext()).toEqual(originalChannel);
+      expect(conversation.getTurnInterfaceContext()).toEqual(originalInterface);
+      expect(conversation).toHaveProperty(
+        "currentTurnAuthContext",
+        originalAuth,
+      );
+      expect(conversation.currentTurnSourceActorPrincipalId).toBe("user-123");
+      expect(conversation.transportHints).toEqual(["original transport"]);
+      expect(coordinator.getTurnOwner("req-original")?.id).toBe(session.id);
+      expect(coordinator.getTurnOwner("req-successor")).toBeUndefined();
+      expect(submissions).toBe(1);
+      expect(
+        capturedAddMessages.filter((message) => message.role === "user"),
+      ).toHaveLength(1);
+      await Promise.all([conversation.drainQueue(), conversation.drainQueue()]);
+      expect(pendingRuns).toHaveLength(2);
+      conversation.enqueueMessage({
+        content: "later request",
+        requestId: "req-later",
+      });
+      expect(
+        await pendingRuns[1].onCheckpoint!({
+          turnIndex: 0,
+          toolCount: 1,
+          hasToolUse: true,
+          history,
+        }),
+      ).toBe("handoff");
+      await resolveRun(1);
+      await waitForPendingRun(3);
+      expect(conversation.currentRequestId).toBe("req-later");
+      expect(submissions).toBe(2);
+      await resolveRun(2);
+      await waitForCondition(() => !conversation.isProcessing());
+      expect(pendingRuns).toHaveLength(3);
+    },
+  );
+
+  test.each([
+    "cancel",
+    "scheduled cancel",
+    "dispose",
+    "new owner",
+    "completed new owner",
+  ])(
+    "does not resume a handoff after %s during finalization",
+    async (action) => {
+      const { conversation, original, finishCommit } =
+        await pauseHandoffAtCommit();
+      expect(conversation.isProcessing()).toBe(false);
+      expect(conversation.hasInFlightWork()).toBe(true);
+      if (action === "cancel") {
+        conversation.abort(createAbortReason("user_cancel", "test", "conv-1"));
+      } else if (action === "scheduled cancel") {
+        conversation.abortScheduledRun("run-unrelated");
+        expect(conversation.checkpointContinuation).toBeDefined();
+        conversation.abortScheduledRun("run-123");
+      } else if (action === "dispose") {
+        conversation.dispose();
+      } else {
+        conversation.setProcessing(true);
+        if (action === "completed new owner") {
+          conversation.setProcessing(false);
+        }
+      }
+      finishCommit.resolve();
+      await original;
+      await conversation.drainQueue();
+      expect(pendingRuns).toHaveLength(1);
+      expect(conversation.checkpointContinuation).toBeUndefined();
+      expect(conversation.isProcessing()).toBe(action === "new owner");
+      expect(conversation.hasInFlightWork()).toBe(action === "new owner");
+      conversation.setProcessing(false);
+    },
+  );
+
+  test.each(["resolve", "reject"])(
+    "retries continuation when an outstanding timed-out Git commit later %ss",
+    async (settlement) => {
+      const previous = getConfig().workspaceGit;
+      setConfig("workspaceGit", { ...previous, turnCommitMaxWaitMs: 10 });
+      try {
+        const { conversation, original, finishCommit } =
+          await pauseHandoffAtCommit();
+        await original;
+        await conversation.drainQueue();
+        expect(pendingRuns).toHaveLength(1);
+        expect(conversation.checkpointContinuation).toBeDefined();
+        expect(conversation.hasInFlightWork()).toBe(true);
+        if (settlement === "reject") {
+          finishCommit.reject(new Error("commit failed"));
+        } else {
+          finishCommit.resolve();
+        }
+        await waitForPendingRun(2);
+        expect(conversation.currentRequestId).toBe("req-original");
+        expect(conversation.currentTurnCronRunId).toBe("run-123");
+        await resolveRun(1);
+        await waitForCondition(() => !conversation.isProcessing());
+        expect(pendingRuns).toHaveLength(2);
+      } finally {
+        setConfig("workspaceGit", previous);
+      }
+    },
+  );
+
+  test.each(["retry", "cancel", "new owner"])(
+    "processing-marker failure preserves only a live continuation (%s)",
+    async (outcome) => {
+      const { conversation, original, finishCommit } =
+        await pauseHandoffAtCommit();
+      const ensureMarker =
+        conversation.ensureProcessingMarker.bind(conversation);
+      const kickDrain = conversation.kickDrainQueue.bind(conversation);
+      let drain = Promise.resolve();
+      conversation.kickDrainQueue = (...args) => {
+        drain = kickDrain(...args);
+        return drain;
+      };
+      const markerEntered = Promise.withResolvers<void>();
+      const finishMarker = Promise.withResolvers<void>();
+      let attempts = 0;
+      conversation.ensureProcessingMarker = async (owner) => {
+        attempts++;
+        if (attempts === 1) {
+          markerEntered.resolve();
+          await finishMarker.promise;
+          throw new Error("processing marker unavailable");
+        }
+        return ensureMarker(owner);
+      };
+      finishCommit.resolve();
+      await original;
+      await markerEntered.promise;
+      if (outcome === "cancel") {
+        conversation.abort(createAbortReason("user_cancel", "test", "conv-1"));
+      } else if (outcome === "new owner") {
+        conversation.setProcessing(true);
+      }
+      finishMarker.resolve();
+      if (outcome === "retry") {
+        await waitForPendingRun(2);
+        expect(attempts).toBe(2);
+        expect(conversation.currentRequestId).toBe("req-original");
+        await resolveRun(1);
+        await waitForCondition(() => !conversation.isProcessing());
+      } else {
+        await drain;
+        expect(pendingRuns).toHaveLength(1);
+        expect(attempts).toBe(1);
+      }
+      await drain;
+      expect(conversation.checkpointContinuation).toBeUndefined();
+      conversation.setProcessing(false);
+    },
+  );
 
   test("[experimental] onCheckpoint yields when there is a queued message", async () => {
     const conversation = makeConversation();

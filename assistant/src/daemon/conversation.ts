@@ -378,6 +378,11 @@ export class Conversation {
   private idleWaiters = new Set<() => void>();
   private stale = false;
   /** @internal */ abortController: AbortController | null = null;
+  /** @internal */ checkpointContinuation?: {
+    readonly controller: AbortController;
+    readonly cronRunId: string | null;
+    readonly resume: () => Promise<void>;
+  };
   /** @internal */ prompter: PermissionPrompter;
   /** @internal */ secretPrompter: SecretPrompter;
   private executor: ToolExecutor;
@@ -2246,6 +2251,7 @@ export class Conversation {
     if (value) {
       try {
         setConversationProcessingStartedAt(this.conversationId, Date.now());
+        this.checkpointContinuation = undefined;
       } catch (err) {
         this._processing = wasProcessing;
         this.processingOwner = wasOwner;
@@ -2295,6 +2301,7 @@ export class Conversation {
       return null;
     }
     this._processing = true;
+    this.checkpointContinuation = undefined;
     const owner = ++this.nextProcessingOwner;
     this.processingOwner = owner;
     this.processingMarker = {
@@ -2620,6 +2627,7 @@ export class Conversation {
   hasInFlightWork(): boolean {
     return (
       this.isProcessing() ||
+      this.checkpointContinuation !== undefined ||
       this.hasQueuedMessages() ||
       this.pendingQueuedDispatches.size > 0 ||
       this.liveVoiceResidencyLeases > 0 ||

@@ -190,7 +190,7 @@ describe("RetryProvider — callSite resolution", () => {
     }
   });
 
-  test("does not stamp OpenCode headers on openai-compatible", async () => {
+  test("stamps shim headers without OpenCode headers on openai-compatible", async () => {
     setLlmConfig({
       callSites: {
         memoryRetrieval: {
@@ -212,7 +212,10 @@ describe("RetryProvider — callSite resolution", () => {
     });
 
     const config = seen?.config as Record<string, unknown>;
-    expect(config.requestHeaders).toBeUndefined();
+    expect(config.requestHeaders).toEqual({
+      "X-Call-Site": "memoryRetrieval",
+      "X-Conversation-Id": "conv-xyz",
+    });
     expect(config.conversationId).toBeUndefined();
   });
 

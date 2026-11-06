@@ -239,8 +239,8 @@ active decisions, open questions, commitments, project states.
  * the model knows exactly where "before" ends).
  */
 const FIXED_BOUNDARY_COMPACTION_PROMPT = `<compaction_instructions>
-The user has asked to summarize this conversation up to a fixed point they
-chose. Everything BEFORE that point is replaced by your summary; the boundary
+The compaction boundary has already been selected from the conversation
+history. Everything BEFORE that point is replaced by your summary; the boundary
 message and everything after it are preserved verbatim. You do not choose the
 cut — it is already fixed.
 
@@ -936,6 +936,45 @@ function resolveTailFloorIndex(messages: Message[], tailIndex: number): number {
   return tailIndex;
 }
 
+/**
+ * A front-truncated summary request is a projection, not an addressable copy
+ * of history: its first user turn may be only a synthetic truncation marker.
+ * A CLI-backed provider can also see native turns absent from Vellum. Never
+ * ask the model/shim to identify a durable cut against that projection.
+ * Choose a clean boundary in the original history before the summary call,
+ * using the usual budget walk and most-recent-exchange floor.
+ */
+function chooseOverflowTailBoundary(args: CompactionRunArgs): number | null {
+  const firstBoundary = args.messages.findIndex(
+    (_, index) => index > 0 && isForwardCutBoundary(args.messages, index),
+  );
+  if (firstBoundary < 0) {
+    return null;
+  }
+  const targetTokens =
+    args.targetTokens ?? Math.max(1, Math.floor(args.maxInputTokens * 0.25));
+  // Leave space for the summary; the post-summary budget enforcement still
+  // uses actual summary/image costs and may advance this automatic cut.
+  const summaryReserve = Math.min(4_000, Math.floor(targetTokens * 0.2));
+  return advanceTailForBudget({
+    messages: args.messages,
+    startIndex: firstBoundary,
+    floorIndex: resolveTailFloorIndex(args.messages, firstBoundary),
+    targetTokens: Math.max(1, targetTokens - summaryReserve),
+    estimateTail: (tail) =>
+      estimatePromptTokens(
+        stripInjectionsForCompaction(tail),
+        args.systemPrompt,
+        {
+          providerName:
+            args.provider.tokenEstimationProvider ?? args.provider.name,
+          model: args.provider.defaultModel,
+          toolTokenBudget: args.tools ? estimateToolsTokens(args.tools) : 0,
+        },
+      ),
+  }).index;
+}
+
 // ---------------------------------------------------------------------------
 // Retained-image hydration
 // ---------------------------------------------------------------------------
@@ -1345,6 +1384,43 @@ export async function runAssistantDrivenCompaction(
     return emptyResult(args, thresholdTokens, "fixed boundary out of range");
   }
 
+  // Bound the summary call's own input to the context window. With no tool
+  // pair to anchor an emergency split, an overflow recovery routes the full
+  // history straight here, so the summary call must front-truncate itself or
+  // it overflows in turn. Truncation operates on the sanitized projection
+  // (what the request actually carries) so the budget estimate is honest —
+  // estimating on raw history would count media bytes the request strips.
+  // `args.messages` stays intact for tail resolution below — only the
+  // outbound request is truncated. A below-budget history is returned
+  // untouched, keeping the prefix aligned with the agent's warm cache.
+  const sanitizedHistory = preModelCallSanitize(args.messages);
+  const summaryHistory = truncateHistoryToBudget({
+    messages: sanitizedHistory,
+    systemPrompt: args.systemPrompt,
+    budgetTokens: compactionPrefixBudget(args.maxInputTokens),
+    providerName: args.provider.tokenEstimationProvider ?? args.provider.name,
+    model: args.provider.defaultModel,
+  });
+  // Front truncation adds synthetic user turns that cannot be resolved back
+  // into args.messages. Pin an automatic, pair-safe cut in the original
+  // history BEFORE asking for the summary; ignore model/shim tail references
+  // on this path. A user-specified boundary remains authoritative.
+  let authoritativeTailStartIndex = fixedTailStartIndex;
+  if (
+    authoritativeTailStartIndex == null &&
+    summaryHistory !== sanitizedHistory
+  ) {
+    const overflowBoundary = chooseOverflowTailBoundary(args);
+    if (overflowBoundary == null) {
+      return emptyResult(args, thresholdTokens, "no safe overflow boundary");
+    }
+    authoritativeTailStartIndex = overflowBoundary;
+    log.info(
+      { conversationId: args.conversationId, tailIndex: overflowBoundary },
+      "Pinned compaction boundary against real history after input truncation",
+    );
+  }
+
   // Build image manifest from the DB before invoking the model so the
   // instruction message carries a faithful picture of available images.
   // Filtered by actor trust so untrusted turns never see guardian-only
@@ -1360,27 +1436,11 @@ export async function runAssistantDrivenCompaction(
     args.compaction.prompt ?? null,
     manifestText,
     args.targetTokens,
-    fixedTailStartIndex != null
-      ? describeFixedBoundary(args.messages[fixedTailStartIndex])
+    authoritativeTailStartIndex != null
+      ? describeFixedBoundary(args.messages[authoritativeTailStartIndex])
       : undefined,
   );
 
-  // Bound the summary call's own input to the context window. With no tool
-  // pair to anchor an emergency split, an overflow recovery routes the full
-  // history straight here, so the summary call must front-truncate itself or
-  // it overflows in turn. Truncation operates on the sanitized projection
-  // (what the request actually carries) so the budget estimate is honest —
-  // estimating on raw history would count media bytes the request strips.
-  // `args.messages` stays intact for tail resolution below — only the
-  // outbound request is truncated. A below-budget history is returned
-  // untouched, keeping the prefix aligned with the agent's warm cache.
-  const summaryHistory = truncateHistoryToBudget({
-    messages: preModelCallSanitize(args.messages),
-    systemPrompt: args.systemPrompt,
-    budgetTokens: compactionPrefixBudget(args.maxInputTokens),
-    providerName: args.provider.tokenEstimationProvider ?? args.provider.name,
-    model: args.provider.defaultModel,
-  });
   const requestMessages = buildCompactionRequest(summaryHistory, instruction);
 
   let response: ProviderResponse;
@@ -1428,7 +1488,7 @@ export async function runAssistantDrivenCompaction(
 
   const rawText = extractTextFromResponse(response.content);
   const parsed = parseCompactionResult(rawText, {
-    requireTailStart: fixedTailStartIndex == null,
+    requireTailStart: authoritativeTailStartIndex == null,
   });
   if (!parsed) {
     log.warn(
@@ -1452,12 +1512,12 @@ export async function runAssistantDrivenCompaction(
     };
   }
 
-  // The caller's fixed boundary is authoritative — any `<tail_start>` the
-  // model emitted anyway is ignored. Without a fixed boundary, resolve the
-  // model's choice against the live messages.
+  // Both caller-fixed and overflow-selected boundaries are authoritative.
+  // A synthetic request marker or native CLI-only turn is never a tail.
+  // Otherwise resolve the model's choice against the live messages.
   let resolvedTailIndex: number;
-  if (fixedTailStartIndex != null) {
-    resolvedTailIndex = fixedTailStartIndex;
+  if (authoritativeTailStartIndex != null) {
+    resolvedTailIndex = authoritativeTailStartIndex;
   } else {
     const timestamps = buildTimestampIndex(args.messages);
     const modelTailIndex = resolveTailStartIndex(

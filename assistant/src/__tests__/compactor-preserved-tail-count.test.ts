@@ -82,8 +82,10 @@ describe("runAssistantDrivenCompaction — preservedTailMessages count", () => {
       provider: makeProvider(),
       systemPrompt: "system",
       compaction: { enabled: true, autoThreshold: 0.7 },
-      maxInputTokens: 1000,
-      previousEstimatedInputTokens: 900,
+      // Keep the summary request below its input budget: this test checks
+      // model-selected tail accounting, not overflow-selected boundaries.
+      maxInputTokens: 10_000,
+      previousEstimatedInputTokens: 9_000,
     });
 
     expect(result.compacted).toBe(true);

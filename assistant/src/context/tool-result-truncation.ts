@@ -1,4 +1,5 @@
 import { truncateToolResultText } from "../plugins/defaults/tool-result-truncate/terminal.js";
+import { carrySourceTags } from "../providers/source-ids.js";
 import type {
   ContentBlock,
   Message,
@@ -38,5 +39,8 @@ export function truncateToolResultsAcrossHistory(
     return changed ? { ...msg, content: nextContent } : msg;
   });
 
+  // Object spread drops non-enumerable source tags on both rows and blocks.
+  // Preserve each original block owner, including merged multi-row results.
+  carrySourceTags(messages, mapped);
   return { messages: truncatedCount > 0 ? mapped : messages, truncatedCount };
 }

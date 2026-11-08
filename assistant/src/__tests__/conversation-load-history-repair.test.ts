@@ -6,6 +6,7 @@ import {
   TRUNCATION_MARKER,
 } from "../context/post-turn-tool-result-truncation.js";
 import { resolveMessageContentBlocks } from "../persistence/message-content-file.js";
+import { blockSourceId, messageSourceId } from "../providers/source-ids.js";
 import type { Message } from "../providers/types.js";
 
 mock.module("../providers/registry.js", () => ({
@@ -1203,6 +1204,8 @@ describe("loadFromDb tool-result truncation", () => {
     if (block.type !== "tool_result" || typeof block.content !== "string") {
       throw new Error("expected a string tool_result block");
     }
+    expect(blockSourceId(block)).toBe("m3");
+    expect(messageSourceId(messages[2])).toBe("m3");
     expect(block.content).toContain(TRUNCATION_MARKER);
     expect(block.content.length).toBeLessThan(fullContent.length);
 

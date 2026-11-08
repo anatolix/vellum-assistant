@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { carrySourceTags } from "../providers/source-ids.js";
 import type {
   ContentBlock,
   Message,
@@ -318,6 +319,9 @@ export function postTurnTruncateToolResults(
     return changed ? { ...msg, content: nextContent } : msg;
   });
 
+  // Object spread drops non-enumerable source tags on both rows and blocks.
+  // Preserve each original block owner, including merged multi-row results.
+  carrySourceTags(messages, mapped);
   return { messages: truncatedCount > 0 ? mapped : messages, truncatedCount };
 }
 
@@ -392,6 +396,7 @@ export function derefToolResultReReads(messages: Message[]): {
     return changed ? { ...msg, content: nextContent } : msg;
   });
 
+  carrySourceTags(messages, mapped);
   return {
     messages: dereferencedCount > 0 ? mapped : messages,
     dereferencedCount,
